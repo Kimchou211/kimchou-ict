@@ -1,0 +1,5 @@
+# Copy to .dev.vars for local Wrangler development.
+# Keep values out of source control and never publish them.
+APP_PASSWORD=
+GEMINI_API_KEY=
+DEEPSEEK_API_KEY=

@@ -1,0 +1,42 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "trading1",
+  "account_id": "d5c1927a139cd70349e332b3a4d45307",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-10-12",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./static",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/uploads/*", "/favicon.ico"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "jd-analysis-db",
+      "database_id": "47a53d84-d805-4d10-b54a-a21f56595276",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "UPLOADS",
+      "bucket_name": "jd-analysis-uploads"
+    }
+  ],
+  "vars": {
+    "APP_NAME": "JD ANALYSIS",
+    "GEMINI_MODEL": "gemini-3.6-flash",
+    "DEEPSEEK_VISION_MODEL": "deepseek-flash",
+    "DEEPSEEK_CHAT_MODEL": "deepseek-flash",
+    "MAX_UPLOAD_MB": "12",
+    "CONFIDENCE_MINIMUM": "65",
+    "PRICE_AGREEMENT_ABSOLUTE": "0.50",
+    "ATR_AGREEMENT_PERCENT": "0.20",
+    "FORCE_SIGNAL": "true"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}
