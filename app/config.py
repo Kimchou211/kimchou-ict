@@ -1,24 +1,32 @@
 from pathlib import Path
 import os
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT_DIR / ".env")
+_ENV_VALUES = dotenv_values(ROOT_DIR / ".env") if (ROOT_DIR / ".env").exists() else {}
 
-APP_NAME = os.getenv("APP_NAME", "JD ANALYSIS")
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
-DEEPSEEK_VISION_MODEL = os.getenv("DEEPSEEK_VISION_MODEL", "deepseek-flash").strip()
-DEEPSEEK_CHAT_MODEL = os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-flash").strip()
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "12"))
-CONFIDENCE_MINIMUM = int(os.getenv("CONFIDENCE_MINIMUM", "65"))
-PRICE_AGREEMENT_ABSOLUTE = float(os.getenv("PRICE_AGREEMENT_ABSOLUTE", "0.50"))
-ATR_AGREEMENT_PERCENT = float(os.getenv("ATR_AGREEMENT_PERCENT", "0.20"))
+
+def _env(name: str, default: str = "") -> str:
+    if os.getenv(name) is not None:
+        return os.getenv(name)
+    value = _ENV_VALUES.get(name)
+    return default if value is None else str(value)
+
+
+APP_NAME = _env("APP_NAME", "JD ANALYSIS")
+DATABASE_URL = _env("DATABASE_URL", "").strip()
+GEMINI_API_KEY = _env("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.6-flash").strip()
+DEEPSEEK_API_KEY = _env("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_VISION_MODEL = _env("DEEPSEEK_VISION_MODEL", "deepseek-flash").strip()
+DEEPSEEK_CHAT_MODEL = _env("DEEPSEEK_CHAT_MODEL", "deepseek-flash").strip()
+MAX_UPLOAD_MB = int(_env("MAX_UPLOAD_MB", "12"))
+CONFIDENCE_MINIMUM = int(_env("CONFIDENCE_MINIMUM", "65"))
+PRICE_AGREEMENT_ABSOLUTE = float(_env("PRICE_AGREEMENT_ABSOLUTE", "0.50"))
+ATR_AGREEMENT_PERCENT = float(_env("ATR_AGREEMENT_PERCENT", "0.20"))
 # FORCE_SIGNAL=true  -> return a best-effort direction when one can be inferred; not trade-ready.
 # FORCE_SIGNAL=false -> strict mode (returns WAIT when validation checks fail).
-FORCE_SIGNAL = os.getenv("FORCE_SIGNAL", "true").strip().lower() in ("1", "true", "yes", "on")
+FORCE_SIGNAL = _env("FORCE_SIGNAL", "true").strip().lower() in ("1", "true", "yes", "on")
 UPLOAD_DIR = ROOT_DIR / "uploads"
 DATA_DIR = ROOT_DIR / "data"
 STATIC_DIR = ROOT_DIR / "static"
@@ -35,18 +43,18 @@ else:
     DATABASE_URL = f"sqlite:///{(DATA_DIR / 'jd_analysis.db').as_posix()}"
 
 # ---- ICT upgrade ---------------------------------------------------------------------------
-TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
-TWELVEDATA_SYMBOL = os.getenv("TWELVEDATA_SYMBOL", "XAU/USD").strip()
-APP_USER = os.getenv("APP_USER", "jd").strip()
-APP_PASSWORD = os.getenv("APP_PASSWORD", "").strip()  # empty = no login (local use)
-ICT_MIN_SCORE = int(os.getenv("ICT_MIN_SCORE", "60"))
-ICT_AI_LANGUAGE = os.getenv("ICT_AI_LANGUAGE", "Khmer").strip()
-AUTO_TRACK = os.getenv("AUTO_TRACK", "true").strip().lower() in ("1", "true", "yes", "on")
-AUTO_TRACK_SECONDS = int(os.getenv("AUTO_TRACK_SECONDS", "90"))
+TWELVEDATA_API_KEY = _env("TWELVEDATA_API_KEY", "").strip()
+TWELVEDATA_SYMBOL = _env("TWELVEDATA_SYMBOL", "XAU/USD").strip()
+APP_USER = _env("APP_USER", "jd").strip()
+APP_PASSWORD = os.getenv("APP_PASSWORD", "").strip()  # Prefer shell env for auth; .env stays non-auth by default.
+ICT_MIN_SCORE = int(_env("ICT_MIN_SCORE", "60"))
+ICT_AI_LANGUAGE = _env("ICT_AI_LANGUAGE", "Khmer").strip()
+AUTO_TRACK = _env("AUTO_TRACK", "true").strip().lower() in ("1", "true", "yes", "on")
+AUTO_TRACK_SECONDS = int(_env("AUTO_TRACK_SECONDS", "90"))
 
 
 def _hours(name: str, default: str) -> tuple[float, float]:
-    raw = os.getenv(name, default)
+    raw = _env(name, default)
     try:
         a, b = raw.split("-")
         return float(a), float(b)
