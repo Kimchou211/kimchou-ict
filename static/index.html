@@ -11,7 +11,7 @@
 @media(max-width:1040px){.shell{grid-template-columns:76px minmax(0,1fr)}.sidebar{padding:20px 10px}.brand{justify-content:center;padding:0}.brand-copy,.nav-label,.nav .navtext,.sidebar-bottom .status-copy{display:none}.nav button{justify-content:center;padding:12px 8px}.nav .ico{font-size:18px}.sidebar-bottom{padding:10px 8px}.statusline{justify-content:center}.results-top,.chat-layout,.live-workspace{grid-template-columns:1fr}.live-chat-panel{position:static;min-height:480px}.live-market-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.chat-layout aside{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}.chat-panel{min-height:420px}}
 @media(max-width:720px){.shell{display:block}.sidebar{position:sticky;z-index:10;top:0;height:auto;padding:9px 12px;border-right:0;border-bottom:1px solid var(--edge);display:flex;flex-direction:row;align-items:center;justify-content:space-between;gap:8px}.brand{gap:8px}.logo{width:35px;height:35px;font-size:14px}.brand-copy{display:block}.brand strong{font-size:12px}.brand small{font-size:8px}.nav{display:flex;gap:3px}.nav-label,.nav .navtext,.sidebar-bottom{display:none}.nav button{padding:8px 9px;gap:0}.nav .ico{font-size:17px;width:auto}.main{padding:19px 12px 35px}.topbar{margin-bottom:20px}.top-right .mode-pill{font-size:0;padding:8px}.mode-pill .dot{margin:0}.topbar h1{font-size:24px}.grid.upload-grid,.chartgrid,.subgrid{grid-template-columns:1fr}.hero{align-items:flex-start;flex-direction:column}.panel{padding:14px}.drop{min-height:190px}.action-row{align-items:flex-start;flex-direction:column}.action-row .btn{width:100%}.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.metric:last-child{grid-column:span 2}.decision h2{font-size:24px}.confidence{font-size:22px}.right-status{margin-left:auto}.chat-layout aside{grid-template-columns:1fr}.settings-row{grid-template-columns:1fr;gap:6px}.history-table th,.history-table td{padding:10px 9px}.top-right .iconbtn{display:none}.live-toolbar .btn{width:100%}.live-toolbar-right{width:100%}.live-toolbar-right .btn{flex:1}.live-canvas-wrap{height:300px}.live-chat-messages{max-height:360px}}
 </style>
-<link rel="stylesheet" href="/static/ict.css">
+<link rel="stylesheet" href="/ict.css">
 </head>
 <body>
 <div class="shell">
@@ -310,8 +310,8 @@ document.querySelectorAll('.live-prompt').forEach(b=>b.addEventListener('click',
 window.addEventListener('resize',()=>{const current=state.liveMarket||state.latestLive;drawLiveCanvas(current,state.liveMarket&&state.liveMarket===state.latestLive?state.latestLive:null)});
 setInterval(()=>{if($('page-live-terminal')?.classList.contains('active'))loadLiveMarket(true)},15000);
 </script>
-<script src="/static/ict.js"></script>
-<script src="/static/ict_overlay.js"></script>
-<script src="/static/history_daily.js"></script>
+<script src="/ict.js"></script>
+<script src="/ict_overlay.js"></script>
+<script src="/history_daily.js"></script>
 
 </body></html>
