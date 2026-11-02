@@ -21,7 +21,7 @@
   "r2_buckets": [
     {
       "binding": "UPLOADS",
-      "bucket_name": "jd-analysis-uploads"
+      "bucket_name": "jdcou-up"
     }
   ],
   "vars": {
