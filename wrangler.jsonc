@@ -14,14 +14,6 @@
       "/favicon.ico"
     ]
   },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "jdchou1",
-      "database_id": "3ef883bd-0267-4888-880a-ffca8a2acb98",
-      "migrations_dir": "migrations"
-    }
-  ],
   "r2_buckets": [
     {
       "binding": "UPLOADS",
@@ -37,13 +29,17 @@
     "CONFIDENCE_MINIMUM": "65",
     "PRICE_AGREEMENT_ABSOLUTE": "0.50",
     "ATR_AGREEMENT_PERCENT": "0.20",
-    "FORCE_SIGNAL": "true"
+    "FORCE_SIGNAL": "true",
+    "TWELVEDATA_SYMBOL": "XAU/USD",
+    "ICT_MIN_SCORE": "60",
+    "ICT_AI_LANGUAGE": "Khmer"
   },
   "secrets": {
     "required": [
       "APP_PASSWORD",
       "GEMINI_API_KEY",
-      "DEEPSEEK_API_KEY"
+      "DEEPSEEK_API_KEY",
+      "DATABASE_URL"
     ]
   },
   "observability": {

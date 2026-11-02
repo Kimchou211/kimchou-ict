@@ -7,7 +7,7 @@
 ## មុខងារមានក្នុង Project
 
 - Dashboard សម្រាប់ XAUUSD តែមួយ។
-- Live Chat Terminal ដាច់ដោយឡែក៖ quote/candles ពី Yahoo Finance XAUUSD=X សម្រាប់ M1/M5/M15/H1, auto-refresh quote រៀងរាល់ 15 វិនាទីពេលផ្ទាំងបើក, Canvas candlesticks + EMA 9/21 overlay, RSI 14, ATR 14, MACD និង 20-candle breakout confluence scan។
+- Live Chat Terminal ដាច់ដោយឡែក៖ quote/candles ពី Twelve Data ពេលកំណត់ key ឬ Yahoo Finance XAUUSD=X ជា fallback សម្រាប់ M1/M5/M15/H1, auto-refresh quote រៀងរាល់ 15 វិនាទីពេលផ្ទាំងបើក, Canvas candlesticks + EMA 9/21 overlay, RSI 14, ATR 14, MACD និង 20-candle breakout confluence scan។
 - ប៊ូតុង **Analyzer · Scan Market** ដំណើរការស្កេន technical indicators ហើយស្នើ DeepSeek ឲ្យពិនិត្យ direction ដោយឡែក។ បើ AI និង technical scan មិនស្របគ្នា ប្រព័ន្ធបង្ហាញ WAIT/confirmation មិនបង្ខំ signal ទេ។ បើមិនមាន DeepSeek key វានៅតែបង្ហាញ technical scan ហើយសម្គាល់ថា AI មិនបានពិនិត្យ។
 - Live Terminal Chat មាន context ផ្សេងពី DeepSeek Chat ធម្មតា ហើយមិនប្រើរូបភាពដែល upload ក្នុង Chart Analyzer ជាប្រភព live price ទេ។
 - Live scans រក្សាទុកក្នុង Signal History ជា `LIVE` ដើម្បីអាចពិនិត្យ និង mark TP1/TP2/SL ពេល trade ចប់។
@@ -123,13 +123,16 @@ ATR_AGREEMENT_PERCENT=0.20
 ## 9. API endpoints
 
 - `GET /api/health` — app/database/provider config status
-- `GET /api/live-market?interval=1m` — quote/candles និង indicator snapshot ពី Yahoo Finance (`1m`, `5m`, `15m`, `60m`)
+- `GET /api/live-market?interval=1m` — quote/candles និង indicator snapshot ពី Twelve Data (បើកំណត់ key) ឬ Yahoo fallback (`1m`, `5m`, `15m`, `60m`)
 - `POST /api/live-analyze?interval=1m` — scan technical confluence, optional DeepSeek review, Canvas levels និង save live signal ទៅ history
 - `POST /api/live-chat` — DeepSeek chat ជាមួយ live market context និង latest analyzer scan
 - `POST /api/analyze` — multipart screenshots + timeframes
 - `GET /api/history` — recent signal history
 - `GET /api/history/{id}` — detail for one signal
 - `POST /api/chat` — DeepSeek contextual chat
+- `GET /api/ict/candles?tf=M5&symbol=XAUUSD` — candles សម្រាប់ ICT Terminal
+- `POST /api/ict/scan?tf=M5&symbol=XAUUSD&ai=true` — multi-timeframe ICT scan និង save ទៅ Neon
+- `GET /api/stats/daily?days=14&tz_offset_min=420` — Daily Win Rate តាម timezone របស់ browser
 
 ## Disclaimer
 
@@ -153,36 +156,33 @@ FORCE_SIGNAL=true
 
 ## 11. Deploy frontend និង backend ទៅ Cloudflare
 
-Cloudflare deployment ប្រើ **Workers** សម្រាប់ API/backend, **Workers Static Assets** សម្រាប់ dashboard, **D1** សម្រាប់ signal history និង **R2** សម្រាប់ screenshots។ Worker មានឈ្មោះ `trading1` ដើម្បីឲ្យត្រូវនឹង Workers Builds project ដែលភ្ជាប់នឹង repository នេះ។ API របស់ Gemini/DeepSeek នៅតែត្រូវហៅទៅ provider ដើមតាម Internet; កុំដាក់ API key ក្នុង source code ឬ `wrangler.jsonc`។ App ដែល deploy នឹងទាមទារ Basic Auth មុនចូល API និងរូបភាព ដោយ username `jd-analysis` និង password ដែលអ្នកកំណត់ជា Worker secret។
+Cloudflare deployment ប្រើ **Workers** សម្រាប់ API/backend, **Workers Static Assets** សម្រាប់ dashboard, **Neon PostgreSQL** សម្រាប់ signal history និង **R2** សម្រាប់ screenshots។ Worker មានឈ្មោះ `kimchou-ict` តាម `wrangler.jsonc`។ API របស់ Gemini/DeepSeek នៅតែត្រូវហៅទៅ provider ដើមតាម Internet; កុំដាក់ API key ឬ `DATABASE_URL` ក្នុង source code ឬ `wrangler.jsonc`។ App ដែល deploy នឹងទាមទារ Basic Auth មុនចូល API និងរូបភាព ដោយ username `jd-analysis` និង password ដែលអ្នកកំណត់ជា Worker secret។
 
 ### Run local
 
 1. ដំឡើង Node.js LTS។
 2. ក្នុង project folder ដំណើរការ `npm install`។
-3. ចម្លង `.dev.vars.example` ទៅ `.dev.vars` រួចបើក `.dev.vars` ហើយបំពេញ `APP_PASSWORD` និង API key ដែលចង់ប្រើ។ ឯកសារនេះត្រូវបាន `.gitignore` រារាំង។
-4. ដំណើរការ `npm run db:local` ដើម្បីបង្កើត schema ក្នុង D1 simulator ហើយ `npm run dev`។
+3. ចម្លង `.dev.vars.example` ទៅ `.dev.vars` ហើយបំពេញ `APP_PASSWORD`, `DATABASE_URL` របស់ Neon និង API key ដែលចង់ប្រើ។ ឯកសារនេះត្រូវបាន `.gitignore` រារាំង។
+4. ដំណើរការ `npm run dev`។ Worker ប្រើតារាង `analysis_records` ដែលមានស្រាប់ក្នុង Neon ដូច backend Python; មិនត្រូវរត់ migration ឬបង្កើតតារាងឡើងវិញទេ។
 5. បើក URL ដែល Wrangler បង្ហាញ។ Browser នឹងស្នើ Basic Auth; username គឺ `jd-analysis`។
 
 ### Deploy ទៅ Cloudflare
 
-1. ចូល Cloudflare ដោយ `npx wrangler login`។ Workers និង D1/R2 ត្រូវបើកសម្រាប់ account នោះ។
-2. `wrangler.jsonc` កំណត់ account ID `d5c1927a139cd70349e332b3a4d45307` ឲ្យត្រូវនឹង Workers Builds។ Wrangler token នៅម៉ាស៊ីននេះត្រូវបានផ្ទៀងផ្ទាត់ថាមានសិទ្ធិតែ account `77fa8828b4edb71086e716e10532ae55` ដូច្នេះត្រូវបន្ថែម user នេះទៅ account `d5…` ឬ login ជា user ដែលមានសិទ្ធិ account នោះ មុនប្រើ Wrangler ដើម្បីបង្កើត resources/deploy។ Resource IDs និង secrets ត្រូវមានក្នុង account `d5…` ផ្ទាល់; ការកំណត់ account ID ក្នុង config មិនផ្ទេរ D1 ឬ R2 resources ពី account ផ្សេងទេ។
-3. D1 `jd-analysis-db` ត្រូវបានបង្កើតរួចហើយ និងមាន ID ក្នុង `wrangler.jsonc`; migration ដំបូងក៏បានអនុវត្តរួចលើ database នោះ។ បើ account សម្រាប់ deploy ជា account ផ្សេង សូមបង្កើត D1 ថ្មីក្នុង account នោះ ហើយប្ដូរ `database_id` ក្នុង config រួចអនុវត្ត migration ដោយ `npm run db:remote`។ សូមបើក R2 ក្នុង account ដដែលពី Cloudflare Dashboard ជាមុន (អាចតម្រូវឲ្យបន្ថែម billing) រួចបង្កើត bucket:
+1. ចូល Cloudflare ដោយ `npx wrangler login`។ ត្រូវមានសិទ្ធិ Workers និង R2 លើ account ក្នុង `wrangler.jsonc`; Neon connection URL ត្រូវអាចប្រើបានពី Cloudflare Workers។
+2. `wrangler.jsonc` កំណត់ account ID `77fa8828b4edb71086e716e10532ae55` និង R2 bucket `jdcou-up`។ បើ account ឬ bucket មិនត្រូវ សូមកែតែការកំណត់ R2 ឱ្យត្រូវនឹង bucket ដែលមានស្រាប់។
+3. ពិនិត្យថា Neon URL ភ្ជាប់ទៅ database ដូចគ្នា និងមានសិទ្ធិអាន/សរសេរ `analysis_records`។ Worker មិនបង្កើត ឬកែ schema ទេ។ R2 bucket ដែលមានស្រាប់នៅតែរក្សារូបភាព។
 
-   ```powershell
-   npx wrangler r2 bucket create jd-analysis-uploads
-   ```
-
-4. បើ D1 ថ្មីមិនទាន់មាន schema សូមដំណើរការ `npm run db:remote`; លើ account បច្ចុប្បន្ន វានឹងរាយការណ៍ថាគ្មាន migration ដែលនៅសល់។
-5. កំណត់ secrets ក្នុង account/Worker ដែល deploy ទៅ។ អ្នកអាចកំណត់តាម Worker Settings → Variables and Secrets ក្នុង Dashboard សម្រាប់ `trading1`, ឬប្រើ Wrangler ដែលចូល account ដូចគ្នា។ បើក prompt ម្តងមួយ ហើយបញ្ចូលតម្លៃដោយផ្ទាល់—កុំដាក់តម្លៃជា command argument:
+4. កំណត់ secrets ក្នុង account/Worker ដែល deploy ទៅ ដោយបើក prompt ម្តងមួយ ហើយបញ្ចូលតម្លៃដោយផ្ទាល់—កុំដាក់តម្លៃជា command argument:
 
    ```powershell
    npx wrangler secret put APP_PASSWORD
+   npx wrangler secret put DATABASE_URL
    npx wrangler secret put GEMINI_API_KEY
    npx wrangler secret put DEEPSEEK_API_KEY
+   npx wrangler secret put TWELVEDATA_API_KEY
    ```
 
-   `APP_PASSWORD` ចាំបាច់ មិនដូច្នោះទេ API និងរូប upload នឹងនៅជាប់សោ។ API key យ៉ាងហោចណាស់មួយត្រូវការសម្រាប់ការវិភាគ; DeepSeek key ត្រូវការសម្រាប់ Chat។
-6. ផ្ទៀងផ្ទាត់ដោយ `npm run check` និង deploy ដោយ `npm run deploy`។ URL `workers.dev` នឹងបង្ហាញក្នុងលទ្ធផល។
+   `APP_PASSWORD` និង `DATABASE_URL` ចាំបាច់។ API key យ៉ាងហោចណាស់មួយត្រូវការសម្រាប់ការវិភាគ; DeepSeek key ត្រូវការសម្រាប់ Chat និង optional ICT review។ Twelve Data key ជាជម្រើស ប៉ុន្តែជួយផ្តល់ candle feed មាន fallback ទៅ Yahoo។
+5. ផ្ទៀងផ្ទាត់ដោយ `npm run check` និង deploy ដោយ `npm run deploy`។ URL `workers.dev` នឹងបង្ហាញក្នុងលទ្ធផល។
 
-កុំដាក់ `.env`, `.dev.vars`, API keys ឬ `APP_PASSWORD` ក្នុង Git/issue/chat។ `.env` ចាស់សម្រាប់ការរត់ Python ក្នុងម៉ាស៊ីននេះប៉ុណ្ណោះ; Wrangler secrets មិនត្រូវបាន sync ពីវាដោយស្វ័យប្រវត្តិទេ។ History ក្នុង SQLite/Neon និងរូបភាព local ចាស់មិនត្រូវបាន import ទៅ D1/R2 ដោយ deployment នេះទេ។ កម្មវិធីដែល deploy និងទិន្នន័យថ្មីនឹងស្ថិតក្នុង Cloudflare។ សូមពិនិត្យ plan, quotas និងតម្លៃ Cloudflare និង AI providers មុនដាក់ឱ្យប្រើប្រាស់ជាសាធារណៈ។
+កុំដាក់ `.env`, `.dev.vars`, API keys, `DATABASE_URL` ឬ `APP_PASSWORD` ក្នុង Git/issue/chat។ `.env` ចាស់សម្រាប់ការរត់ Python ក្នុងម៉ាស៊ីននេះប៉ុណ្ណោះ; Wrangler secrets មិនត្រូវបាន sync ពីវាដោយស្វ័យប្រវត្តិទេ។ Worker និង Python backend ចែករំលែកប្រវត្តិពីតារាង Neon ដែលមានស្រាប់; រូបភាពនៅតែរក្សាទុកក្នុង R2។ D1 resource ឬ migration file ចាស់ៗមិនត្រូវបានលុបចោលទេ ប៉ុន្តែ Worker មិនប្រើ D1 ទៀតទេ។ សូមពិនិត្យ plan, quotas និងតម្លៃ Cloudflare, Neon និង AI providers មុនដាក់ឱ្យប្រើប្រាស់ជាសាធារណៈ។

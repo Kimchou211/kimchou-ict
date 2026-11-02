@@ -1,15 +1,23 @@
-import { analyzeImages, chatWithDeepSeek } from "./ai";
-import { buildTradeRead } from "./trade-engine";
-import { calculateLiveScan, chatWithLiveMarket, fetchLiveMarket, reviewLiveMarket } from "./live-market";
+import { analyzeImages, chatWithDeepSeek, reviewIctWithDeepSeek } from "./ai.ts";
+import { buildTradeRead } from "./trade-engine.ts";
+import { calculateLiveScan, chatWithLiveMarket, fetchLiveMarket, reviewLiveMarket } from "./live-market.ts";
+import { fetchMarketCandles } from "./market-data.ts";
+import { combineIctVerdict, scanIct, validateAiReview } from "./ict-engine.ts";
+import type { IctScanResult, IctTimeframe } from "./ict-engine.ts";
+import { buildDailyStats } from "./daily-stats.ts";
 import type { AnalysisRecord, ChartImage, Env, JsonRecord } from "./types";
+import { createSql, firstRow, logDatabaseError } from "./db.ts";
 
 const TIMEFRAMES = new Set(["M1", "M2", "M3", "M5", "M10", "M15", "M30", "H1", "H2", "H4", "D1", "W1", "MN1"]);
 const OUTCOMES = new Set(["TP1", "TP2", "SL", "SKIP", "CLEAR"]);
 const RESULT_R: Record<string, number> = { TP1: 1, TP2: 1.8, SL: -1 };
 
 class ApiError extends Error {
-  constructor(readonly status: number, message: string) {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
     super(message);
+    this.status = status;
   }
 }
 
@@ -150,9 +158,11 @@ async function imageFromForm(
 async function getHealth(env: Env): Promise<Response> {
   let database = "connected";
   try {
-    await env.DB.prepare("SELECT 1").first();
-  } catch {
+    const sql = createSql(env);
+    await sql`SELECT 1`;
+  } catch (error) {
     database = "offline";
+    logDatabaseError("health_database_check_failed", error);
   }
   return json({
     app: env.APP_NAME || "JD ANALYSIS",
@@ -160,11 +170,12 @@ async function getHealth(env: Env): Promise<Response> {
     providers: {
       gemini_configured: Boolean(env.GEMINI_API_KEY),
       deepseek_configured: Boolean(env.DEEPSEEK_API_KEY),
+      twelvedata_configured: Boolean(env.TWELVEDATA_API_KEY),
     },
     mode: "live-market-and-image-analysis",
     symbol: "XAUUSD",
     live_terminal: true,
-    live_market_provider: "Yahoo Finance XAUUSD=X",
+    live_market_provider: env.TWELVEDATA_API_KEY ? "Twelve Data with Yahoo Finance fallback" : "Yahoo Finance XAUUSD=X",
     force_signal: env.FORCE_SIGNAL?.trim().toLowerCase() !== "false",
   });
 }
@@ -213,13 +224,19 @@ async function analyze(request: Request, env: Env): Promise<Response> {
       savedImages[0].key, savedImages[1].key, JSON.stringify(analysis),
     ];
     try {
-      const inserted = await env.DB.prepare(
-        `INSERT INTO analysis_records
+      const sql = createSql(env);
+      const inserted = await sql`
+        INSERT INTO analysis_records
           (created_at, symbol, tf_primary, tf_secondary, direction, confidence, entry_low, entry_high,
            stop_loss, take_profit_1, take_profit_2, image_primary, image_secondary, payload_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(...values).run();
-      const id = typeof inserted.meta.last_row_id === "number" ? inserted.meta.last_row_id : null;
+        VALUES (
+          ${values[0]}, ${values[1]}, ${values[2]}, ${values[3]}, ${values[4]}, ${values[5]},
+          ${values[6]}, ${values[7]}, ${values[8]}, ${values[9]}, ${values[10]}, ${values[11]},
+          ${values[12]}, ${values[13]}
+        )
+        RETURNING id
+      `;
+      const id = finiteNumber(inserted[0]?.id);
       return json({
         id,
         created_at: createdAt,
@@ -234,7 +251,7 @@ async function analyze(request: Request, env: Env): Promise<Response> {
         analysis,
       });
     } catch (error) {
-      console.error(JSON.stringify({ event: "analysis_history_save_failed", message: error instanceof Error ? error.message : String(error) }));
+      logDatabaseError("analysis_history_save_failed", error);
       return json({
         id: null,
         created_at: createdAt,
@@ -245,7 +262,7 @@ async function analyze(request: Request, env: Env): Promise<Response> {
         image_primary_url: uploadUrl(savedImages[0].key),
         image_secondary_url: uploadUrl(savedImages[1].key),
         history_saved: false,
-        history_error: "Analysis completed, but saving it to D1 failed.",
+        history_error: "Analysis completed, but saving it to the database failed.",
         analysis,
       });
     }
@@ -262,23 +279,37 @@ async function history(env: Env, url: URL): Promise<Response> {
   const requested = Number(url.searchParams.get("limit") || 40);
   const limit = Number.isFinite(requested) ? Math.max(1, Math.min(150, Math.trunc(requested))) : 40;
   try {
-    const result = await env.DB.prepare(
-      "SELECT * FROM analysis_records ORDER BY id DESC LIMIT ?",
-    ).bind(limit).all<AnalysisRecord>();
-    return json({ items: (result.results || []).map(recordPayload), database: "connected" });
+    const sql = createSql(env);
+    const rows = await sql`
+      SELECT id, created_at::text AS created_at, symbol, tf_primary, tf_secondary, direction, confidence,
+             entry_low, entry_high, stop_loss, take_profit_1, take_profit_2,
+             image_primary, image_secondary, payload_json
+      FROM analysis_records
+      ORDER BY id DESC
+      LIMIT ${limit}
+    `;
+    return json({ items: rows.map((row) => recordPayload(row as AnalysisRecord)), database: "connected" });
   } catch (error) {
-    console.error(JSON.stringify({ event: "history_read_failed", message: error instanceof Error ? error.message : String(error) }));
-    return json({ items: [], database: "offline", error: "D1 database is unavailable." });
+    logDatabaseError("history_read_failed", error);
+    return json({ items: [], database: "offline", error: "Database is unavailable." });
   }
 }
 
 async function historyDetail(env: Env, id: number): Promise<Response> {
   try {
-    const row = await env.DB.prepare("SELECT * FROM analysis_records WHERE id = ?").bind(id).first<AnalysisRecord>();
+    const sql = createSql(env);
+    const row = await firstRow(sql`
+      SELECT id, created_at::text AS created_at, symbol, tf_primary, tf_secondary, direction, confidence,
+             entry_low, entry_high, stop_loss, take_profit_1, take_profit_2,
+             image_primary, image_secondary, payload_json
+      FROM analysis_records
+      WHERE id = ${id}
+    `);
     if (!row) throw new ApiError(404, "Signal history item was not found.");
-    return json(recordPayload(row));
+    return json(recordPayload(row as AnalysisRecord));
   } catch (error) {
     if (error instanceof ApiError) throw error;
+    logDatabaseError("history_detail_read_failed", error);
     throw new ApiError(503, "Database unavailable.");
   }
 }
@@ -295,18 +326,29 @@ async function setOutcome(request: Request, env: Env, id: number): Promise<Respo
     badRequest("Result must be TP1, TP2, SL, SKIP or CLEAR.");
   }
   try {
-    const row = await env.DB.prepare("SELECT * FROM analysis_records WHERE id = ?").bind(id).first<AnalysisRecord>();
+    const sql = createSql(env);
+    const row = await firstRow(sql`
+      SELECT id, created_at::text AS created_at, symbol, tf_primary, tf_secondary, direction, confidence,
+             entry_low, entry_high, stop_loss, take_profit_1, take_profit_2,
+             image_primary, image_secondary, payload_json
+      FROM analysis_records
+      WHERE id = ${id}
+    `);
     if (!row) throw new ApiError(404, "Signal history item was not found.");
     const payload = safeJson(row.payload_json);
     if (result === "CLEAR") delete payload.outcome;
     else payload.outcome = { result, at: new Date().toISOString() };
-    const updated = await env.DB.prepare("UPDATE analysis_records SET payload_json = ? WHERE id = ?")
-      .bind(JSON.stringify(payload), id).run();
-    if (!updated.success) throw new ApiError(503, "Database unavailable.");
-    return json(recordPayload({ ...row, payload_json: JSON.stringify(payload) }));
+    const updated = await sql`
+      UPDATE analysis_records
+      SET payload_json = ${JSON.stringify(payload)}
+      WHERE id = ${id}
+      RETURNING id
+    `;
+    if (!updated.length) throw new ApiError(503, "Database unavailable.");
+    return json(recordPayload({ ...row, payload_json: JSON.stringify(payload) } as AnalysisRecord));
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    console.error(JSON.stringify({ event: "outcome_save_failed", message: error instanceof Error ? error.message : String(error) }));
+    logDatabaseError("outcome_save_failed", error);
     throw new ApiError(503, "Database unavailable.");
   }
 }
@@ -326,14 +368,18 @@ function finish(value: ReturnType<typeof bucket>): JsonRecord {
 
 async function stats(env: Env): Promise<Response> {
   try {
-    const response = await env.DB.prepare(
-      "SELECT direction, stop_loss, payload_json FROM analysis_records ORDER BY id DESC LIMIT 2000",
-    ).all<Pick<AnalysisRecord, "direction" | "stop_loss" | "payload_json">>();
+    const sql = createSql(env);
+    const rows = await sql`
+      SELECT direction, stop_loss, payload_json
+      FROM analysis_records
+      ORDER BY id DESC
+      LIMIT 2000
+    `;
     const total = bucket();
     const byGrade: Record<string, ReturnType<typeof bucket>> = {};
     const byDirection: Record<string, ReturnType<typeof bucket>> = {};
     let unresolved = 0;
-    for (const row of response.results || []) {
+    for (const row of rows) {
       if (!["BUY", "SELL"].includes(row.direction) || row.stop_loss === null) continue;
       const result = safeJson(row.payload_json);
       const outcome = (result.outcome as { result?: unknown } | undefined)?.result;
@@ -341,7 +387,8 @@ async function stats(env: Env): Promise<Response> {
         if (outcome !== "SKIP") unresolved++;
         continue;
       }
-      const value = RESULT_R[outcome];
+      const savedR = finiteNumber((result.outcome as { r?: unknown } | undefined)?.r);
+      const value = savedR ?? RESULT_R[outcome];
       const gradeName = typeof result.signal_grade === "string" && result.signal_grade ? result.signal_grade : "-";
       for (const group of [total, byGrade[gradeName] ||= bucket(), byDirection[row.direction] ||= bucket()]) {
         group.resolved++;
@@ -357,9 +404,161 @@ async function stats(env: Env): Promise<Response> {
       by_direction: Object.fromEntries(Object.entries(byDirection).map(([key, value]) => [key, finish(value)])),
     });
   } catch (error) {
-    console.error(JSON.stringify({ event: "stats_read_failed", message: error instanceof Error ? error.message : String(error) }));
-    return json({ resolved: 0, unresolved: 0, error: "D1 database is unavailable.", by_grade: {}, by_direction: {} });
+    logDatabaseError("stats_read_failed", error);
+    return json({ resolved: 0, unresolved: 0, error: "Database is unavailable.", by_grade: {}, by_direction: {} });
   }
+}
+
+async function statsDaily(env: Env, url: URL): Promise<Response> {
+  const rawDays = Number(url.searchParams.get("days") || "14");
+  const rawOffset = Number(url.searchParams.get("tz_offset_min") || "0");
+  if (!Number.isInteger(rawDays) || rawDays < 1 || rawDays > 60) badRequest("days must be between 1 and 60.");
+  if (!Number.isInteger(rawOffset) || rawOffset < -840 || rawOffset > 840) badRequest("tz_offset_min must be between -840 and 840.");
+  const symbolFilter = url.searchParams.get("symbol");
+  try {
+    const sql = createSql(env);
+    const rows = await sql`
+      SELECT created_at::text AS created_at, symbol, direction, stop_loss, payload_json
+      FROM analysis_records
+      ORDER BY id DESC
+      LIMIT 3000
+    `;
+    const dailyRecords = rows.map((row) => ({
+      created_at: typeof row.created_at === "string" ? row.created_at : "",
+      symbol: typeof row.symbol === "string" ? row.symbol : "",
+      direction: typeof row.direction === "string" ? row.direction : "",
+      stop_loss: finiteNumber(row.stop_loss),
+      payload_json: typeof row.payload_json === "string" ? row.payload_json : "",
+    }));
+    const result = buildDailyStats(dailyRecords, rawDays, rawOffset, Date.now(), symbolFilter);
+    return json(result);
+  } catch (error) {
+    logDatabaseError("daily_stats_read_failed", error);
+    return json({ days: [], today: null, error: "Database is unavailable." });
+  }
+}
+
+function ictSymbol(value: string | null): string {
+  const symbol = (value || "XAUUSD").toUpperCase().replace(/[\/\-\s]/g, "");
+  if (["XAUUSD", "XAUUSDM", "GOLD", "GOLDUSD"].includes(symbol)) return "XAUUSD";
+  if (["BTCUSD", "BTCUSDT", "BTCUSDM", "BITCOIN", "XBTUSD"].includes(symbol)) return "BTCUSD";
+  badRequest("Unsupported symbol. Use XAUUSD or BTCUSD.");
+}
+
+function feedMetadata(feed: Awaited<ReturnType<typeof fetchMarketCandles>>): JsonRecord {
+  return {
+    symbol: feed.symbol, tf: feed.tf, source: feed.source, last_bar_time: feed.last_bar_time,
+    age_seconds: feed.age_seconds, fetched_at: feed.fetched_at, market_closed: feed.market_closed,
+    is_stale: feed.is_stale, fallback_reason: feed.fallback_reason, price: feed.price,
+  };
+}
+
+async function ictCandles(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const tf = (url.searchParams.get("tf") || "M5").toUpperCase();
+  const symbol = ictSymbol(url.searchParams.get("symbol"));
+  if (!["M1", "M5", "M15", "H1"].includes(tf)) badRequest("Unsupported timeframe. Use M1, M5, M15 or H1.");
+  try {
+    const feed = await fetchMarketCandles(symbol, tf, env);
+    return json({ feed: feedMetadata(feed), bars: feed.bars.slice(-300) });
+  } catch (error) {
+    throw new ApiError(503, `Candle feed unavailable: ${error instanceof Error ? error.message.slice(0, 350) : String(error).slice(0, 350)}`);
+  }
+}
+
+function grade(score: number): string {
+  return score >= 80 ? "A" : score >= 65 ? "B" : score >= 50 ? "C" : "D";
+}
+
+async function ictScan(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const timeframe = (url.searchParams.get("tf") || "M5").toUpperCase();
+  const symbol = ictSymbol(url.searchParams.get("symbol"));
+  if (timeframe !== "M1" && timeframe !== "M5" && timeframe !== "M15") {
+    badRequest("Entry timeframe must be M1, M5 or M15.");
+  }
+  const tf: IctTimeframe = timeframe;
+  const useAi = (url.searchParams.get("ai") || "true").toLowerCase() !== "false";
+  const minScore = env.ICT_MIN_SCORE === undefined ? 60 : Number(env.ICT_MIN_SCORE);
+  if (!Number.isInteger(minScore) || minScore < 0 || minScore > 100) {
+    throw new ApiError(500, "ICT_MIN_SCORE Worker variable must be an integer from 0 to 100.");
+  }
+  let feeds: Record<string, Awaited<ReturnType<typeof fetchMarketCandles>>>;
+  let engineResult: IctScanResult;
+  try {
+    const timeframes = [...new Set(["H1", "M15", tf])];
+    const fetched = await Promise.all(timeframes.map((frame) => fetchMarketCandles(symbol, frame, env)));
+    feeds = Object.fromEntries(timeframes.map((frame, index) => [frame, fetched[index]]));
+    engineResult = scanIct(Object.fromEntries(timeframes.map((frame) => [frame, feeds[frame].bars])), tf, symbol, { minScore });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Unsupported")) badRequest(error.message);
+    throw new ApiError(503, `ICT scan failed: ${error instanceof Error ? error.message.slice(0, 350) : String(error).slice(0, 350)}`);
+  }
+
+  const ltfFeed = feeds[tf];
+  const feedOk = !ltfFeed.is_stale && !ltfFeed.market_closed;
+  let review: Awaited<ReturnType<typeof reviewIctWithDeepSeek>> | null = null;
+  let validation: ReturnType<typeof validateAiReview> | null = null;
+  if (useAi) {
+    review = await reviewIctWithDeepSeek(env, engineResult, ltfFeed.bars);
+    if (review.ok) validation = validateAiReview(review, engineResult);
+  }
+  const verdict = combineIctVerdict(engineResult, review, validation, feedOk);
+  const analysis: JsonRecord = {
+    ...engineResult,
+    ...verdict,
+    engine_direction: engineResult.direction,
+    feed: feedMetadata(ltfFeed),
+    ai_review: review,
+    ai_validation: validation,
+    ict_scan: true,
+    signal_grade: grade(Number(verdict.final_confidence) || 0),
+    scan_source: `ict_engine${review?.ok ? "+deepseek" : ""}`,
+    feeds: Object.fromEntries(Object.entries(feeds).map(([frame, feed]) => [frame, feedMetadata(feed)])),
+    bars: ltfFeed.bars.slice(-160),
+  };
+  const plan = engineResult.plan;
+  const tradable = ["BUY", "SELL"].includes(String(verdict.final_direction)) && plan !== null;
+  if (tradable && plan) {
+    analysis.ict_plan = plan;
+    analysis.ict_track = { state: "PENDING" };
+  }
+  const createdAt = new Date().toISOString();
+  let id: number | null = null;
+  let historySaved = true;
+  let historyError: string | null = null;
+  try {
+    const sql = createSql(env);
+    const inserted = await sql`
+      INSERT INTO analysis_records
+        (created_at, symbol, tf_primary, tf_secondary, direction, confidence, entry_low, entry_high,
+         stop_loss, take_profit_1, take_profit_2, image_primary, image_secondary, payload_json)
+      VALUES (
+        ${createdAt}, ${symbol}, ${tf}, ${"ICT"}, ${String(verdict.final_direction)},
+        ${Number(verdict.final_confidence) || 0},
+        ${tradable && plan ? finiteNumber(plan.entry_low) : null},
+        ${tradable && plan ? finiteNumber(plan.entry_high) : null},
+        ${tradable && plan ? finiteNumber(plan.stop) : null},
+        ${tradable && plan ? finiteNumber(plan.tp1) : null},
+        ${tradable && plan ? finiteNumber(plan.tp2) : null},
+        ${""}, ${""}, ${JSON.stringify(analysis)}
+      )
+      RETURNING id
+    `;
+    id = finiteNumber(inserted[0]?.id);
+    if (id === null) {
+      historySaved = false;
+      historyError = "Database did not return the inserted record ID.";
+    }
+  } catch (error) {
+    historySaved = false;
+    historyError = "Database unavailable.";
+    logDatabaseError("ict_scan_history_save_failed", error);
+  }
+  return json({
+    id, created_at: createdAt, history_saved: historySaved, history_error: historyError,
+    tf_primary: tf, tf_secondary: "ICT", analysis,
+  });
 }
 
 async function chat(request: Request, env: Env): Promise<Response> {
@@ -381,15 +580,16 @@ async function chat(request: Request, env: Env): Promise<Response> {
   let context: JsonRecord | null = null;
   let contextId: number | null = null;
   try {
+    const sql = createSql(env);
     const row = analysisId
-      ? await env.DB.prepare("SELECT id, payload_json FROM analysis_records WHERE id = ?").bind(Number(analysisId)).first<Pick<AnalysisRecord, "id" | "payload_json">>()
-      : await env.DB.prepare("SELECT id, payload_json FROM analysis_records ORDER BY id DESC LIMIT 1").first<Pick<AnalysisRecord, "id" | "payload_json">>();
+      ? await firstRow(sql`SELECT id, payload_json FROM analysis_records WHERE id = ${Number(analysisId)}`)
+      : await firstRow(sql`SELECT id, payload_json FROM analysis_records ORDER BY id DESC LIMIT 1`);
     if (row) {
       context = safeJson(row.payload_json);
       contextId = row.id;
     }
   } catch (error) {
-    console.error(JSON.stringify({ event: "chat_context_read_failed", message: error instanceof Error ? error.message : String(error) }));
+    logDatabaseError("chat_context_read_failed", error);
   }
   try {
     const answer = await chatWithDeepSeek(env, message, context);
@@ -399,11 +599,11 @@ async function chat(request: Request, env: Env): Promise<Response> {
   }
 }
 
-async function liveMarket(request: Request): Promise<Response> {
+async function liveMarket(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const interval = url.searchParams.get("interval") || "1m";
   try {
-    const market = await fetchLiveMarket(interval);
+    const market = await fetchLiveMarket(interval, env);
     return json(calculateLiveScan(market));
   } catch (error) {
     throw new ApiError(503, `Live market data unavailable: ${error instanceof Error ? error.message.slice(0, 320) : String(error).slice(0, 320)}`);
@@ -415,7 +615,7 @@ async function liveAnalyze(request: Request, env: Env): Promise<Response> {
   const interval = url.searchParams.get("interval") || "1m";
   let scan: JsonRecord;
   try {
-    scan = calculateLiveScan(await fetchLiveMarket(interval));
+    scan = calculateLiveScan(await fetchLiveMarket(interval, env));
   } catch (error) {
     throw new ApiError(503, `Live market data unavailable: ${error instanceof Error ? error.message.slice(0, 320) : String(error).slice(0, 320)}`);
   }
@@ -442,23 +642,25 @@ async function liveAnalyze(request: Request, env: Env): Promise<Response> {
   let historySaved = true;
   let historyError: string | null = null;
   try {
-    const inserted = await env.DB.prepare(
-      `INSERT INTO analysis_records
+    const sql = createSql(env);
+    const inserted = await sql`
+      INSERT INTO analysis_records
         (created_at, symbol, tf_primary, tf_secondary, direction, confidence, entry_low, entry_high,
          stop_loss, take_profit_1, take_profit_2, image_primary, image_secondary, payload_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(
-      createdAt, "XAUUSD", String((scan.feed as JsonRecord | undefined)?.timeframe || "M1"), "LIVE",
-      String(scan.direction || "WAIT"), finiteNumber(scan.confidence) || 0,
-      finiteNumber(scan.entry_low), finiteNumber(scan.entry_high), finiteNumber(scan.stop_loss),
-      finiteNumber(scan.take_profit_1), finiteNumber(scan.take_profit_2), "", "", JSON.stringify(scan),
-    ).run();
-    id = typeof inserted.meta.last_row_id === "number" ? inserted.meta.last_row_id : null;
+      VALUES (
+        ${createdAt}, ${"XAUUSD"}, ${String((scan.feed as JsonRecord | undefined)?.timeframe || "M1")}, ${"LIVE"},
+        ${String(scan.direction || "WAIT")}, ${finiteNumber(scan.confidence) || 0},
+        ${finiteNumber(scan.entry_low)}, ${finiteNumber(scan.entry_high)}, ${finiteNumber(scan.stop_loss)},
+        ${finiteNumber(scan.take_profit_1)}, ${finiteNumber(scan.take_profit_2)}, ${""}, ${""}, ${JSON.stringify(scan)}
+      )
+      RETURNING id
+    `;
+    id = finiteNumber(inserted[0]?.id);
     if (id === null) { historySaved = false; historyError = "Database did not return the inserted record ID."; }
   } catch (error) {
     historySaved = false;
-    historyError = error instanceof Error ? error.message.slice(0, 250) : String(error).slice(0, 250);
-    console.error(JSON.stringify({ event: "live_scan_history_save_failed", message: historyError }));
+    historyError = "Database unavailable.";
+    logDatabaseError("live_scan_history_save_failed", error);
   }
   return json({ id, created_at: createdAt, tf_primary: String((scan.feed as JsonRecord | undefined)?.timeframe || "M1"),
     tf_secondary: "LIVE", history_saved: historySaved, history_error: historyError, analysis: scan });
@@ -472,16 +674,22 @@ async function liveChat(request: Request, env: Env): Promise<Response> {
 
   let currentScan: JsonRecord;
   try {
-    currentScan = calculateLiveScan(await fetchLiveMarket("1m"));
+    currentScan = calculateLiveScan(await fetchLiveMarket("1m", env));
   } catch (error) {
     throw new ApiError(503, `Live market data unavailable: ${error instanceof Error ? error.message.slice(0, 260) : String(error).slice(0, 260)}`);
   }
   let savedScan: JsonRecord | null = null;
   try {
-    const row = await env.DB.prepare("SELECT payload_json FROM analysis_records WHERE tf_secondary = 'LIVE' ORDER BY id DESC LIMIT 1").first<{ payload_json: string }>();
+    const sql = createSql(env);
+    const row = await firstRow(sql`
+      SELECT payload_json FROM analysis_records
+      WHERE tf_secondary = ${"LIVE"}
+      ORDER BY id DESC
+      LIMIT 1
+    `);
     if (row?.payload_json) savedScan = safeJson(row.payload_json);
   } catch (error) {
-    console.error(JSON.stringify({ event: "live_chat_context_read_failed", message: error instanceof Error ? error.message : String(error) }));
+    logDatabaseError("live_chat_context_read_failed", error);
   }
   if (savedScan) {
     currentScan.latest_analyzer_scan = {
@@ -526,12 +734,15 @@ async function dispatch(request: Request, env: Env): Promise<Response> {
     return uploadedImage(env, pathname);
   }
   if (pathname === "/api/health" && request.method === "GET") return getHealth(env);
-  if (pathname === "/api/live-market" && request.method === "GET") return liveMarket(request);
+  if (pathname === "/api/live-market" && request.method === "GET") return liveMarket(request, env);
   if (pathname === "/api/live-analyze" && request.method === "POST") return liveAnalyze(request, env);
   if (pathname === "/api/live-chat" && request.method === "POST") return liveChat(request, env);
   if (pathname === "/api/analyze" && request.method === "POST") return analyze(request, env);
   if (pathname === "/api/history" && request.method === "GET") return history(env, new URL(request.url));
   if (pathname === "/api/stats" && request.method === "GET") return stats(env);
+  if (pathname === "/api/stats/daily" && request.method === "GET") return statsDaily(env, requestUrl);
+  if (pathname === "/api/ict/candles" && request.method === "GET") return ictCandles(request, env);
+  if (pathname === "/api/ict/scan" && request.method === "POST") return ictScan(request, env);
   const outcomeMatch = pathname.match(/^\/api\/history\/(\d+)\/outcome$/);
   if (outcomeMatch && request.method === "POST") return setOutcome(request, env, Number(outcomeMatch[1]));
   const detailMatch = pathname.match(/^\/api\/history\/(\d+)$/);

@@ -1,12 +1,16 @@
 export interface Env {
   ASSETS: Fetcher;
-  DB: D1Database;
+  DATABASE_URL: string;
   UPLOADS: R2Bucket;
   APP_NAME?: string;
   APP_PASSWORD?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
   DEEPSEEK_API_KEY?: string;
+  TWELVEDATA_API_KEY?: string;
+  TWELVEDATA_SYMBOL?: string;
+  ICT_AI_LANGUAGE?: string;
+  ICT_MIN_SCORE?: string;
   DEEPSEEK_VISION_MODEL?: string;
   DEEPSEEK_CHAT_MODEL?: string;
   MAX_UPLOAD_MB?: string;

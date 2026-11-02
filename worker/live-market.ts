@@ -1,83 +1,24 @@
 import type { Env, JsonRecord } from "./types";
+import { fetchMarketCandles } from "./market-data.ts";
 
 type Candle = { time: string; timestamp_ms: number; open: number; high: number; low: number; close: number; volume: number; ema9?: number; ema21?: number; ema50?: number };
-const INTERVALS: Record<string, { range: string; minutes: number; label: string }> = {
-  "1m": { range: "1d", minutes: 1, label: "M1" },
-  "5m": { range: "5d", minutes: 5, label: "M5" },
-  "15m": { range: "1mo", minutes: 15, label: "M15" },
-  "60m": { range: "1mo", minutes: 60, label: "H1" },
-};
+const INTERVALS: Record<string, string> = { "1m": "M1", "5m": "M5", "15m": "M15", "60m": "H1" };
 
-function n(value: unknown): number | null {
-  if (value === null || value === undefined || typeof value === "boolean") return null;
-  const valueNumber = Number(value);
-  return Number.isFinite(valueNumber) ? valueNumber : null;
-}
-
-async function yahooError(response: Response): Promise<Error> {
-  const text = (await response.text()).replace(/\s+/g, " ").slice(0, 240);
-  return new Error(`Yahoo Finance request failed (${response.status})${text ? `: ${text}` : ""}`);
-}
-
-export async function fetchLiveMarket(interval: string): Promise<JsonRecord> {
-  const options = INTERVALS[interval];
-  if (!options) throw new Error("Unsupported interval. Choose 1m, 5m, 15m or 60m.");
-  const url = new URL("https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD%3DX");
-  url.searchParams.set("range", options.range);
-  url.searchParams.set("interval", interval);
-  url.searchParams.set("includePrePost", "true");
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; JD-ANALYSIS/1.1)",
-      Accept: "application/json",
-    },
-    signal: AbortSignal.timeout(12_000),
-  });
-  if (!response.ok) throw await yahooError(response);
-  const payload = await response.json() as {
-    chart?: { error?: { description?: string } | null; result?: Array<{
-      timestamp?: number[];
-      meta?: Record<string, unknown>;
-      indicators?: { quote?: Array<Record<string, unknown>> };
-    }> | null };
-  };
-  const result = payload.chart?.result?.[0];
-  if (payload.chart?.error || !result) {
-    throw new Error(`XAUUSD spot feed unavailable${payload.chart?.error?.description ? `: ${payload.chart.error.description}` : ". Try Refresh or verify the provider."}`);
-  }
-  const quote = result.indicators?.quote?.[0] || {};
-  const timestamps = result.timestamp || [];
-  const pick = (key: string, index: number): unknown => {
-    const values = quote[key];
-    return Array.isArray(values) ? values[index] : null;
-  };
-  const bars: Candle[] = [];
-  timestamps.forEach((stamp, index) => {
-    const open = n(pick("open", index));
-    const high = n(pick("high", index));
-    const low = n(pick("low", index));
-    const close = n(pick("close", index));
-    if (open === null || high === null || low === null || close === null || high < low) return;
-    bars.push({
-      time: new Date(stamp * 1000).toISOString(), timestamp_ms: stamp * 1000,
-      open, high, low, close, volume: n(pick("volume", index)) || 0,
-    });
-  });
-  if (bars.length < 35) throw new Error(`Live XAUUSD feed returned only ${bars.length} usable candles; at least 35 are needed for a scan.`);
-  const meta = result.meta || {};
-  const now = Date.now() / 1000;
-  const lastEpoch = bars[bars.length - 1].timestamp_ms / 1000;
-  const ageSeconds = Math.max(0, Math.floor(now - lastEpoch));
-  const metaPrice = n(meta.regularMarketPrice);
-  const price = metaPrice !== null && ageSeconds <= 180 ? metaPrice : bars[bars.length - 1].close;
+export async function fetchLiveMarket(interval: string, env: Env): Promise<JsonRecord> {
+  const timeframe = INTERVALS[interval];
+  if (!timeframe) throw new Error("Unsupported interval. Choose 1m, 5m, 15m or 60m.");
+  const market = await fetchMarketCandles("XAUUSD", timeframe, env);
+  const lastBar = market.bars[market.bars.length - 1];
   return {
-    symbol: "XAUUSD", feed_symbol: String(meta.symbol || "XAUUSD=X"),
-    source: "Yahoo Finance · XAUUSD spot chart feed", provider_url: "https://finance.yahoo.com/quote/XAUUSD=X/",
-    currency: String(meta.currency || "USD"), exchange_timezone: String(meta.exchangeTimezoneName || "UTC"),
-    interval, timeframe: options.label, price, provider_market_price: metaPrice,
-    last_bar_time: bars[bars.length - 1].time, last_bar_timestamp_ms: bars[bars.length - 1].timestamp_ms,
-    fetched_at: new Date().toISOString(), age_seconds: ageSeconds,
-    is_stale: ageSeconds > Math.max(180, options.minutes * 180), bars: bars.slice(-120),
+    symbol: "XAUUSD", feed_symbol: market.source.includes("Twelve Data") ? "XAU/USD" : "XAUUSD=X",
+    source: `${market.source} · XAUUSD spot chart feed`, provider_url: "https://finance.yahoo.com/quote/XAUUSD=X/",
+    currency: "USD", exchange_timezone: "UTC", interval, timeframe,
+    price: market.price, provider_market_price: null,
+    last_bar_time: market.last_bar_time, last_bar_timestamp_ms: market.last_bar_ms,
+    fetched_at: market.fetched_at, age_seconds: market.age_seconds,
+    is_stale: market.is_stale, bars: market.bars.slice(-120),
+    ...(market.fallback_reason ? { fallback_reason: market.fallback_reason } : {}),
+    ...(lastBar ? { latest_bar: lastBar.time } : {}),
   };
 }
 

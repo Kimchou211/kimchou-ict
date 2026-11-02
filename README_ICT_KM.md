@@ -8,8 +8,8 @@
 3. **AI ICT mentor** (DeepSeek) ទទួលលទ្ធផលដែលគណនារួច ហើយអាចតែ *យល់ព្រម ឬ veto*។ វាត្រូវយោង level តាម id (SWEEP1, FVG1, ENTRY…) ប៉ុណ្ណោះ។ បើវាសរសេរតម្លៃដែលមិនមានក្នុង engine **validator នឹងច្រានចោលចម្លើយ AI ទាំងមូល**។ បើ AI និង engine មិនស្របគ្នា លទ្ធផលគឺ **WAIT**។
 4. Chart គូរ Sweep, BOS/MSS, FVG/OB, liquidity lines, CRT H/L, Range និងប្រអប់ Entry/Stop/TP ជាមួយ R:R។ ប៊ូតុង Liquidity / Range / Structure / Zones / Plan បើក-បិទ layer។ Scroll/pinch = zoom, drag = pan។
 
-## ការកំណត់ (.env)
-- `TWELVEDATA_API_KEY` ← feed ចម្បង (free key ពី twelvedata.com)។ ទទេ = ប្រើ Yahoo ជា fallback (យឺត/មិនស្ថិរជាង)។
+## ការកំណត់ (.env / Cloudflare Worker)
+- `TWELVEDATA_API_KEY` ← feed ចម្បង (free key ពី twelvedata.com)។ ទទេ ឬ provider បរាជ័យ = ប្រើ Yahoo ជា fallback (យឺត/មិនស្ថិរជាង)។ សម្រាប់ Cloudflare Worker ដាក់វាជា Worker secret (`npx wrangler secret put TWELVEDATA_API_KEY`) មិនមែន commit ក្នុង config ឬ source code។
 - `APP_PASSWORD` (និង `APP_USER`) ← បើដាក់ តម្រូវ login ទាំង app។ ទទេ = គ្មាន login។ **ត្រូវដាក់ បើបើកឲ្យចូលតាម Internet។**
 - `ICT_MIN_SCORE=60` ← score ទាបបំផុតសម្រាប់ BUY/SELL។
 - `ICT_AI_LANGUAGE=Khmer`
@@ -17,13 +17,15 @@
 - `AUTO_TRACK=true` ← រាល់ ~90 វិនាទី ពិនិត្យ plan ដែលបានរក្សាទុក។
 
 ## Auto-track TP/SL
-Plan ទាំងអស់ដែលជា BUY/SELL ត្រូវរក្សាទុកក្នុង Signal History។ ប្រព័ន្ធតាមដាន M5 candles៖ PENDING → FILLED (តម្លៃប៉ះ entry zone) → TP1 / TP2 / SL ហើយ mark លទ្ធផលដោយស្វ័យប្រវត្តិ (រួមទាំង R ពិត)។ បើ candle តែមួយប៉ះទាំង SL និង TP វាចាត់ទុក SL មុន (គិតបែប pessimistic)។ បើតម្លៃទៅដល់ TP ដោយមិនប៉ះ entry វា mark "not taken"។ Win rate ក្នុង Signal History ប្រើ R ពិតរបស់ plan។
+ក្នុង Windows/Docker, plan ទាំងអស់ដែលជា BUY/SELL ត្រូវរក្សាទុកក្នុង Signal History។ ប្រព័ន្ធតាមដាន M5 candles៖ PENDING → FILLED (តម្លៃប៉ះ entry zone) → TP1 / TP2 / SL ហើយ mark លទ្ធផលដោយស្វ័យប្រវត្តិ (រួមទាំង R ពិត)។ បើ candle តែមួយប៉ះទាំង SL និង TP វាចាត់ទុក SL មុន (គិតបែប pessimistic)។ បើតម្លៃទៅដល់ TP ដោយមិនប៉ះ entry វា mark "not taken"។
+
+Cloudflare Worker អាចរក្សា ICT scans ក្នុង Signal History និងបង្ហាញ Daily Win Rate ពីលទ្ធផលដែលបាន mark។ Background auto-tracker មិនទាន់មានក្នុង Worker ទេ; សូម mark TP1/TP2/SL/Not taken ដោយដៃក្នុង Signal History។ Win rate ក្នុង History ប្រើ R ពិតនៅពេលមានក្នុង outcome បើមិនដូច្នោះទេប្រើ multiple លំនាំដើម។
 
 ## កំណត់សម្គាល់ដែលត្រូវដឹង
 - ទីផ្សារមាសបិទចុង សប្តាហ៍ (សុក្រ ~22:00 UTC → អាទិត្យ ~23:00 UTC)។ ពេលនោះ scan វិភាគ session ចុងក្រោយ ហើយបង្ហាញ WAIT។
 - Score គឺ confluence មិនមែនប្រូបាប៊ីលីតេឈ្នះទេ។ ត្រូវតាមដាន win rate ពិតក្នុង History មុនទុកចិត្ត។
-- Logic ICT មានតែក្នុង Python (`app/`)។ ថត `worker/` (Cloudflare) មិនត្រូវបានធ្វើបច្ចុប្បន្នភាពទេ ហើយមិនមាន ICT។ ប្រើ Windows/Docker ដូចមុន។
-- Tests: `pytest tests` (16 tests រួមទាំង engine, validator, tracker, API, login)។
+- ICT មានទាំងក្នុង Python (`app/`) និង Cloudflare Worker (`worker/ict-engine.ts`)។ Worker មាន routes `/api/ict/candles`, `/api/ict/scan`, និង `/api/stats/daily`; ICT scan គាំទ្រ XAUUSD និង BTCUSD។ Twelve Data ជា feed ចម្បងពេល Worker secret មាន ហើយ Yahoo ជា fallback។
+- Tests: `pytest tests` សម្រាប់ Python និង `npm test` សម្រាប់ Worker។
 
 ---
 
