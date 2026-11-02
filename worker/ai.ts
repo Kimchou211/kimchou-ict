@@ -1,15 +1,143 @@
 import type { ChartImage, Env, JsonRecord } from "./types";
 import type { IctAiReview, IctScanResult } from "./ict-engine";
 
-const STRICT_SYSTEM_PROMPT =
-  "You are a cautious XAUUSD chart-reading assistant. Analyze only the supplied screenshots; there is no live market feed. Never invent unreadable prices, ATR values, candles, indicator values, timestamps, or news. Use null when a number is not clearly readable. ATR must be copied only from a visible numeric ATR indicator. Current price must come from a visible last-price badge, not an axis tick. You may estimate conditional pullback zones from a readable price axis, but label them estimated. Annotations use normalized coordinates from 0 to 1000. Never promise profit. Return JSON only.";
+const SYSTEM_PROMPT = `You are a cautious XAUUSD chart-reading assistant. Analyze ONLY the two supplied screenshots; there is no live market feed. Never invent unreadable prices, ATR values, candles, indicator values, timestamps, or news. If a number is not clearly printed/readable in the screenshot, use null. ATR must be read ONLY from a visible ATR indicator's numeric value. Do not estimate ATR from pixels. Current price must be read from a visible last-price badge/axis label, otherwise null. A screenshot's right axis labels are scale labels, not necessarily the last price. Distinguish them carefully. Never promise profit. Use BUY, SELL, or WAIT; WAIT is correct if evidence is incomplete or conflicting. For conditional pullback zones, you may estimate a range by interpolating from a readable price axis and visible structure; label it estimated and return null if the price scale cannot be read. Annotations use normalized image coordinates from 0 to 1000 (x=0 left, y=0 top). Return valid JSON only, no markdown.`;
 
-const FORCED_SYSTEM_PROMPT =
-  "You are an XAUUSD chart-reading assistant for an intraday trader. Analyze only the supplied screenshots; there is no live market feed. Choose BUY or SELL using timeframe trend, structure, recent candles, and visible support/resistance; never promise profit. Copy printed numbers into readable value fields only. Use estimate fields for axis-derived price or candle-range estimates. Annotations use normalized coordinates from 0 to 1000. Return JSON only.";
+const JSON_PROMPT = `Analyze the two XAUUSD chart screenshots labeled with their user-selected timeframes. The app is in IMAGE-ONLY mode; no current quote/live market feed is available. Return exactly this JSON structure:
+{
+ "symbol":"XAUUSD",
+ "direction":"BUY|SELL|WAIT",
+ "confidence":0,
+ "setup_rationale":"short concise text",
+ "timeframe_alignment":"aligned|mixed|unclear",
+ "risk_notes":["..."],
+ "chart_reads":[
+  {
+   "timeframe":"M1",
+   "symbol_detected":"XAUUSD|unknown|other",
+   "current_price":null,
+   "current_price_readable":false,
+   "atr_value":null,
+   "atr_visible":false,
+   "atr_period":null,
+   "atr_label":"exact visible label or empty",
+   "trend":"bullish|bearish|sideways|unclear",
+   "structure":"describe visible structure, not a price guess",
+   "price_scale_top":null,
+   "price_scale_bottom":null,
+   "price_scale_readable":false,
+   "confidence":0,
+   "key_levels":[{"price":null,"kind":"support|resistance|liquidity|other","label":"..."}],
+   "annotations":[
+    {"type":"line","x1":0,"y1":0,"x2":1000,"y2":0,"label":"..."},
+    {"type":"rect","x":0,"y":0,"w":0,"h":0,"label":"..."},
+    {"type":"text","x":0,"y":0,"label":"..."}
+   ]
+  }
+ ],
+ "entry_low":null,
+ "entry_high":null,
+ "entry_basis":"why these entry bounds are grounded, or empty",
+ "invalidation":"what would invalidate this idea",
+ "bull_case":"...",
+ "bear_case":"...",
+ "entry_trigger_buy":"specific observable condition before a BUY; do not invent a numeric price",
+ "entry_trigger_sell":"specific observable condition before a SELL; do not invent a numeric price",
+ "pullback_zones":{
+  "BUY":{"low":null,"high":null,"quality":"unavailable","basis":""},
+  "SELL":{"low":null,"high":null,"quality":"unavailable","basis":""}
+ },
+ "preferred_setup":"BUY|SELL|WAIT",
+ "setup_type":"pullback|breakout|reversal|range|none"
+}
+Rules:
+- There must be one chart_reads entry per screenshot, in the same order as the images.
+- User-selected timeframes are authoritative labels; keep each matching label exactly.
+- current_price must be a number only if the image has a readable current-price marker/badge, not merely any price-axis tick. Else null and current_price_readable=false.
+- atr_value must be a number only if an ATR indicator and its numeric current value are actually visible. Else null and atr_visible=false. Do not calculate/guess ATR visually.
+- price_scale_top and price_scale_bottom should be the highest and lowest readable numeric axis labels that are visible and bound the chart plot; only provide both when readable. If unclear, null.
+- Use 2-4 meaningful visual annotations per screenshot. Don't label uncertain prices. Keep normalized coordinates within 0..1000.
+- key_levels prices should be null unless readable from an axis/explicit label.
+- entry_low/high must be null unless defensible from readable chart prices. It is acceptable and preferred to return WAIT if alignment or input quality is poor.
+- Confidence is qualitative model confidence 0-100, NOT win probability.
+- Do not make WAIT the only useful output. Always describe BOTH a conditional bullish and conditional bearish scenario, even if the final decision is WAIT.
+- entry_trigger_buy and entry_trigger_sell must describe observable chart conditions (e.g. close above a swing level and successful retest; or break below a swing low and failed retest). Use readable price values only if grounded in explicit visible labels; otherwise describe the structure without numbers.
+- Always return both BUY and SELL keys in pullback_zones, based on the primary/execution timeframe's visible structure. Place a BUY zone near a plausible support/retest area and a SELL zone near a plausible resistance/retest area; these are conditional watch zones, not current market orders. Use exact printed prices only when clearly readable; otherwise interpolate approximate bounds from a readable price scale and set quality="estimated". If the scale is not readable, set low/high to null and quality="unavailable". Explain the visual basis briefly.
+- If the direction is unclear, choose WAIT as the final bias but still provide useful conditional triggers for both directions.
+- Never claim a setup is guaranteed or always correct. Do not output numeric entry/SL/TP when screenshot values are not clearly readable.`;
 
-const STRICT_SCHEMA_PROMPT = `Return a JSON object with symbol, direction (BUY|SELL|WAIT), confidence (0-100, not win probability), setup_rationale, timeframe_alignment, risk_notes, chart_reads (one per screenshot in order, with timeframe, symbol_detected, current_price/current_price_readable, atr_value/atr_visible/atr_period, trend, structure, price_scale_top/bottom/price_scale_readable, confidence, key_levels, annotations), entry_low, entry_high, entry_basis, invalidation, bull_case, bear_case, entry_trigger_buy, entry_trigger_sell, pullback_zones with BUY and SELL objects (low, high, quality=read|estimated|unavailable, basis), preferred_setup, and setup_type. Do not invent numbers. Always describe both conditional directions.`;
+const SYSTEM_PROMPT_FORCED = `You are an XAUUSD chart-reading assistant for an intraday trader. Analyze ONLY the two supplied screenshots; there is no live market feed. You MUST give a decisive trade direction: BUY or SELL, never WAIT. Decide using: higher-timeframe trend and market structure (higher highs/lows vs lower highs/lows), the most recent break of structure, momentum of the latest candles, and where price sits relative to visible support/resistance (avoid buying straight into resistance or selling straight into support when structure favours the other side). Confidence is qualitative conviction, NOT win probability. When evidence is mixed, still pick the side with the better risk/reward and lower the confidence number (normally 30-55). Use confidence 70+ only when both timeframes and market structure show strong alignment. Preserve the actual confidence represented by your assessment; never inflate it to clear a threshold. Fields named *_value must be copied from numbers printed on the chart; when they are not printed, use the *_estimate fields instead, interpolating from the labelled price axis. Never invent indicator values, timestamps or news. Never promise profit. Annotations use normalized coordinates 0-1000 (x=0 left, y=0 top). Return valid JSON only, no markdown.`;
 
-const FORCED_SCHEMA_PROMPT = `Return a JSON object with symbol, direction and forced_direction (BUY|SELL), confidence, setup_rationale, timeframe_alignment, risk_notes, chart_reads (one per screenshot in order, with timeframe, symbol_detected, current_price/current_price_readable, price_estimate, atr_value/atr_visible/atr_estimate/atr_period, trend, structure, price_scale_top/bottom/price_scale_readable, confidence, key_levels, annotations), invalidation, bull_case, bear_case, entry_trigger_buy, entry_trigger_sell, pullback_zones with BUY and SELL objects (low, high, quality=read|estimated|unavailable, basis), preferred_setup, and setup_type. Estimate only from a readable chart axis; never put estimates in printed-value fields. Always describe both sides.`;
+const JSON_PROMPT_FORCED = `Analyze the two XAUUSD chart screenshots labeled with their user-selected timeframes. Return exactly this JSON structure:
+{
+ "symbol":"XAUUSD",
+ "direction":"BUY|SELL",
+ "forced_direction":"BUY|SELL",
+ "confidence":0,
+ "setup_rationale":"short concise text explaining WHY this side",
+ "timeframe_alignment":"aligned|mixed|unclear",
+ "risk_notes":["..."],
+ "chart_reads":[
+  {
+   "timeframe":"M1",
+   "symbol_detected":"XAUUSD|unknown|other",
+   "current_price":null,
+   "current_price_readable":false,
+   "price_estimate":null,
+   "atr_value":null,
+   "atr_visible":false,
+   "atr_estimate":null,
+   "atr_period":null,
+   "atr_label":"exact visible label or empty",
+   "trend":"bullish|bearish|sideways|unclear",
+   "structure":"describe visible structure",
+   "price_scale_top":null,
+   "price_scale_bottom":null,
+   "price_scale_readable":false,
+   "confidence":0,
+   "key_levels":[{"price":null,"kind":"support|resistance|liquidity|other","label":"..."}],
+   "annotations":[
+    {"type":"line","x1":0,"y1":0,"x2":1000,"y2":0,"label":"..."},
+    {"type":"rect","x":0,"y":0,"w":0,"h":0,"label":"..."},
+    {"type":"text","x":0,"y":0,"label":"..."}
+   ]
+  }
+ ],
+ "invalidation":"what would invalidate this idea",
+ "bull_case":"...",
+ "bear_case":"...",
+ "entry_trigger_buy":"specific observable chart condition for a BUY",
+ "entry_trigger_sell":"specific observable chart condition for a SELL",
+ "pullback_zones":{
+  "BUY":{"low":null,"high":null,"quality":"unavailable","basis":""},
+  "SELL":{"low":null,"high":null,"quality":"unavailable","basis":""}
+ },
+ "preferred_setup":"BUY|SELL",
+ "setup_type":"pullback|breakout|reversal|range|none"
+}
+Rules:
+- direction, forced_direction and preferred_setup must all be the same BUY or SELL value. WAIT is not allowed.
+- One chart_reads entry per screenshot, in the same order as the images. Keep the user-selected timeframe labels exactly.
+- current_price: number only if a last-price badge/marker is printed (current_price_readable=true). Otherwise leave null and put your best estimate of the last candle close in price_estimate (interpolate between labelled axis ticks). price_estimate may be null only if no price axis is visible.
+- atr_value: number only if an ATR indicator with a printed numeric value is visible (atr_visible=true, also give atr_period). Otherwise leave null and put the typical candle range (high minus low) of the last ~14 candles, in price units measured on the axis, in atr_estimate. Never put an estimate in atr_value.
+- Always return both BUY and SELL keys in pullback_zones from the primary/execution timeframe. Use visible support/retest structure for BUY and resistance/retest structure for SELL. These are conditional watch ranges, not market orders. Use quality="read" only for printed prices; use quality="estimated" when interpolating approximate bounds from a readable price axis; otherwise use null bounds and quality="unavailable". Briefly name the visible structure used.
+- price_scale_top / price_scale_bottom: highest and lowest readable axis labels bounding the plot, else null.
+- Use 2-4 meaningful visual annotations per screenshot (structure, zones, trendlines). Keep coordinates within 0..1000.
+- confidence is qualitative conviction 0-100, NOT win probability. Be honest: weak or conflicting evidence is normally 30-55; use 70+ only when both timeframes and market structure strongly align. Do not raise a confidence value just to clear a threshold.
+- Always also describe both entry_trigger_buy and entry_trigger_sell, but the final direction must still be BUY or SELL.`;
+
+const ICT_ADDENDUM = `
+ICT DRAWING MODE (overrides the 2-4 annotation limit: use up to 12 annotations per screenshot):
+Every annotation may carry "ict" and "layer". Allowed ict values: BOS, MSS, SWEEP, FVG, OB, EQH, EQL, PDH, PDL, CRT_H, CRT_L, SWING.
+layer is one of liquidity | structure | zones | range (BOS/MSS/SWING -> structure; SWEEP/EQH/EQL/PDH/PDL -> liquidity; FVG/OB -> zones; CRT_H/CRT_L -> range).
+How to draw (normalized 0..1000 coordinates, x left->right, y top->bottom):
+- BOS / MSS: type "line", a horizontal line at the broken swing level from the swing candle to the candle that closed through it; label "BOS" or "MSS". MSS = first break against the prior trend (change of character).
+- SWEEP: type "text" placed at the wick tip that took liquidity above a high / below a low and closed back inside; label "Sweep".
+- FVG / OB: type "rect" covering only the visible 3-candle gap or the last opposite candle before the displacement; label "FVG" or "OB".
+- EQH / EQL / PDH / PDL / CRT_H / CRT_L: type "line", horizontal across the relevant candles; label with the name.
+- SWING: type "text" label "SH" or "SL" at a clearly visible swing point (use sparingly).
+Mark ONLY elements you can clearly see. Never draw an element to justify a trade. If nothing is clearly visible, draw fewer annotations. Do not put prices in labels unless printed on the chart.
+`;
 
 function parseJsonObject(text: string): JsonRecord {
   const cleaned = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
@@ -31,9 +159,16 @@ function parseJsonObject(text: string): JsonRecord {
   throw new Error("AI provider returned invalid JSON");
 }
 
-function prompt(env: Env, tfPrimary: string, tfSecondary: string): string {
+function symbolPrompt(text: string, symbol: string): string {
+  return text.replaceAll("XAUUSD", symbol);
+}
+
+function prompt(env: Env, tfPrimary: string, tfSecondary: string, symbol: string): string {
   const forced = env.FORCE_SIGNAL?.trim().toLowerCase() !== "false";
-  return `${forced ? FORCED_SYSTEM_PROMPT : STRICT_SYSTEM_PROMPT}\n\n${forced ? FORCED_SCHEMA_PROMPT : STRICT_SCHEMA_PROMPT}\n\nThe first screenshot is ${tfPrimary}; the second screenshot is ${tfSecondary}.`;
+  const system = symbolPrompt(forced ? SYSTEM_PROMPT_FORCED : SYSTEM_PROMPT, symbol);
+  const schema = symbolPrompt(forced ? JSON_PROMPT_FORCED : JSON_PROMPT, symbol)
+    .replace('"M1"', `"${tfPrimary}"`);
+  return `${system}\n\n${schema}${symbolPrompt(ICT_ADDENDUM, symbol)}\n\nThe first screenshot is ${tfPrimary}; the second screenshot is ${tfSecondary}.`;
 }
 
 function imageParts(images: ChartImage[], timeframes: [string, string]): Array<Record<string, unknown>> {
@@ -48,7 +183,30 @@ async function readError(response: Response, provider: string): Promise<Error> {
   return new Error(`${provider} API ${response.status}: ${body}`);
 }
 
-async function callGemini(env: Env, images: ChartImage[], tfs: [string, string]): Promise<JsonRecord> {
+function validateProviderResult(result: JsonRecord, provider: string, tfs: [string, string]): void {
+  const validConfidence = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
+  if (!validConfidence(result.confidence)) {
+    throw new Error(`${provider} returned invalid confidence; expected a number from 0 to 100.`);
+  }
+  if (!Array.isArray(result.chart_reads) || result.chart_reads.length !== 2) {
+    throw new Error(`${provider} returned invalid chart_reads; expected one read for each screenshot.`);
+  }
+  result.chart_reads.forEach((value, index) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`${provider} returned invalid chart read ${index + 1}.`);
+    }
+    const read = value as JsonRecord;
+    if (read.timeframe !== tfs[index]) {
+      throw new Error(`${provider} chart read ${index + 1} timeframe did not match ${tfs[index]}.`);
+    }
+    if (!validConfidence(read.confidence)) {
+      throw new Error(`${provider} chart read ${index + 1} has invalid confidence; expected a number from 0 to 100.`);
+    }
+  });
+}
+
+async function callGemini(env: Env, images: ChartImage[], tfs: [string, string], symbol: string): Promise<JsonRecord> {
   const key = env.GEMINI_API_KEY;
   if (!key) throw new Error("Gemini API key is not configured");
   const model = env.GEMINI_MODEL || "gemini-3.6-flash";
@@ -58,7 +216,7 @@ async function callGemini(env: Env, images: ChartImage[], tfs: [string, string])
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt(env, ...tfs) }, ...imageParts(images, tfs)] }],
+      contents: [{ role: "user", parts: [{ text: prompt(env, ...tfs, symbol) }, ...imageParts(images, tfs)] }],
       generationConfig: { temperature: 0.1, responseMimeType: "application/json", maxOutputTokens: 5000 },
     }),
     signal: AbortSignal.timeout(90_000),
@@ -69,12 +227,14 @@ async function callGemini(env: Env, images: ChartImage[], tfs: [string, string])
     .candidates?.[0]?.content?.parts;
   const text = candidate?.map((part) => part.text || "").join("");
   if (!text) throw new Error("Gemini returned no readable analysis content");
-  return { ...parseJsonObject(text), provider: "Gemini", model };
+  const result = { ...parseJsonObject(text), provider: "Gemini", model };
+  validateProviderResult(result, "Gemini", tfs);
+  return result;
 }
 
-function deepseekContent(images: ChartImage[], tfs: [string, string]): Array<Record<string, unknown>> {
+function deepseekContent(images: ChartImage[], tfs: [string, string], symbol: string): Array<Record<string, unknown>> {
   return [
-    { type: "text", text: `Analyze these XAUUSD screenshots in order: ${tfs[0]}, then ${tfs[1]}. Follow the schema and return JSON only.` },
+    { type: "text", text: `Analyze these ${symbol} screenshots in order: ${tfs[0]}, then ${tfs[1]}. Follow the schema and return JSON only.` },
     ...images.flatMap((image, index) => [
       { type: "text", text: `Screenshot timeframe: ${tfs[index]}.` },
       { type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.base64}`, detail: "high" } },
@@ -86,6 +246,7 @@ async function callDeepSeek(
   env: Env,
   images: ChartImage[],
   tfs: [string, string],
+  symbol: string,
   model = env.DEEPSEEK_VISION_MODEL || "deepseek-flash",
   compact = false,
 ): Promise<JsonRecord> {
@@ -95,15 +256,15 @@ async function callDeepSeek(
   for (let attempt = 0; attempt < 2; attempt++) {
     const compactAttempt = compact || attempt === 1;
     const system = compactAttempt
-      ? `${prompt(env, ...tfs)}\nOutput concise JSON with at most 2 annotations and 3 key levels per image.`
-      : prompt(env, ...tfs);
+      ? `${prompt(env, ...tfs, symbol)}\nOutput concise JSON with at most 14 annotations and 8 key levels per image.`
+      : prompt(env, ...tfs, symbol);
     try {
       const response = await fetch("https://api.deepseek.com/chat/completions", {
         method: "POST",
         headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           model,
-          messages: [{ role: "system", content: system }, { role: "user", content: deepseekContent(images, tfs) }],
+          messages: [{ role: "system", content: system }, { role: "user", content: deepseekContent(images, tfs, symbol) }],
           temperature: 0.1,
           max_tokens: 8000,
           response_format: { type: "json_object" },
@@ -124,7 +285,9 @@ async function callDeepSeek(
         continue;
       }
       try {
-        return { ...parseJsonObject(text), provider: "DeepSeek", model };
+        const result = { ...parseJsonObject(text), provider: "DeepSeek", model };
+        validateProviderResult(result, "DeepSeek", tfs);
+        return result;
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error);
       }
@@ -141,11 +304,12 @@ export async function analyzeImages(
   images: ChartImage[],
   tfPrimary: string,
   tfSecondary: string,
+  symbol: string,
 ): Promise<{ providerResults: JsonRecord[]; providerErrors: Record<string, string> }> {
   const jobs: Array<{ name: string; run: Promise<JsonRecord> }> = [];
-  if (env.GEMINI_API_KEY) jobs.push({ name: "Gemini", run: callGemini(env, images, [tfPrimary, tfSecondary]) });
+  if (env.GEMINI_API_KEY) jobs.push({ name: "Gemini", run: callGemini(env, images, [tfPrimary, tfSecondary], symbol) });
   if (env.DEEPSEEK_API_KEY) {
-    jobs.push({ name: "DeepSeek", run: callDeepSeek(env, images, [tfPrimary, tfSecondary]) });
+    jobs.push({ name: "DeepSeek", run: callDeepSeek(env, images, [tfPrimary, tfSecondary], symbol) });
   }
   if (!jobs.length) throw new Error("Configure at least one Gemini or DeepSeek API key as a Worker secret");
   const settled = await Promise.allSettled(jobs.map((job) => job.run));
@@ -153,7 +317,13 @@ export async function analyzeImages(
   const providerErrors: Record<string, string> = {};
   settled.forEach((result, index) => {
     if (result.status === "fulfilled") providerResults.push(result.value);
-    else providerErrors[jobs[index].name] = (result.reason instanceof Error ? result.reason.message : String(result.reason)).slice(0, 450);
+    else {
+      let message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      for (const secret of [env.GEMINI_API_KEY, env.DEEPSEEK_API_KEY]) {
+        if (secret) message = message.replaceAll(secret, "[redacted]");
+      }
+      providerErrors[jobs[index].name] = message.replace(/([?&]key=)[^&\s]+/gi, "$1[redacted]").slice(0, 450);
+    }
   });
   return { providerResults, providerErrors };
 }

@@ -7,6 +7,7 @@ import type { IctScanResult, IctTimeframe } from "./ict-engine.ts";
 import { buildDailyStats } from "./daily-stats.ts";
 import type { AnalysisRecord, ChartImage, Env, JsonRecord } from "./types";
 import { createSql, firstRow, logDatabaseError } from "./db.ts";
+import { normalizeSymbol } from "./symbols.ts";
 
 const TIMEFRAMES = new Set(["M1", "M2", "M3", "M5", "M10", "M15", "M30", "H1", "H2", "H4", "D1", "W1", "MN1"]);
 const OUTCOMES = new Set(["TP1", "TP2", "SL", "SKIP", "CLEAR"]);
@@ -189,6 +190,12 @@ async function analyze(request: Request, env: Env): Promise<Response> {
   }
   const tfPrimary = (form.get("tf_primary")?.toString() || "M1").toUpperCase();
   const tfSecondary = (form.get("tf_secondary")?.toString() || "M5").toUpperCase();
+  let symbol: string;
+  try {
+    symbol = normalizeSymbol(form.get("symbol")?.toString());
+  } catch {
+    badRequest("Unsupported symbol. Use XAUUSD or BTCUSD.");
+  }
   if (!TIMEFRAMES.has(tfPrimary) || !TIMEFRAMES.has(tfSecondary) || tfPrimary === tfSecondary) {
     badRequest("Choose two different supported timeframes.");
   }
@@ -200,7 +207,7 @@ async function analyze(request: Request, env: Env): Promise<Response> {
     savedImages.push(await imageFromForm(form.get("secondary_image"), maxBytes, env.UPLOADS));
     let aiResults: Awaited<ReturnType<typeof analyzeImages>>;
     try {
-      aiResults = await analyzeImages(env, savedImages, tfPrimary, tfSecondary);
+      aiResults = await analyzeImages(env, savedImages, tfPrimary, tfSecondary, symbol);
     } catch (error) {
       await deleteUploadedImages(env.UPLOADS, savedImages);
       if (error instanceof Error && error.message.startsWith("Configure at least one")) {
@@ -214,11 +221,11 @@ async function analyze(request: Request, env: Env): Promise<Response> {
       throw new ApiError(502, `All configured AI providers failed. ${errors || "Check API keys/model names."}`);
     }
 
-    const analysis = buildTradeRead(aiResults.providerResults, aiResults.providerErrors, tfPrimary, tfSecondary, env);
+    const analysis = buildTradeRead(aiResults.providerResults, aiResults.providerErrors, tfPrimary, tfSecondary, env, symbol);
     analysis.provider_errors = aiResults.providerErrors;
     const createdAt = new Date().toISOString();
     const values = [
-      createdAt, "XAUUSD", tfPrimary, tfSecondary, String(analysis.direction || "WAIT"),
+      createdAt, symbol, tfPrimary, tfSecondary, String(analysis.direction || "WAIT"),
       finiteNumber(analysis.confidence) || 0, finiteNumber(analysis.entry_low), finiteNumber(analysis.entry_high),
       finiteNumber(analysis.stop_loss), finiteNumber(analysis.take_profit_1), finiteNumber(analysis.take_profit_2),
       savedImages[0].key, savedImages[1].key, JSON.stringify(analysis),

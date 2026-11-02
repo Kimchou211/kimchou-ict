@@ -1,10 +1,18 @@
 import type { Env, JsonRecord } from "./types";
+import { matchesSymbol, symbolProfile } from "./symbols.ts";
 
 const TF_MINUTES: Record<string, number> = {
   M1: 1, M2: 2, M3: 3, M5: 5, M10: 10, M15: 15, M30: 30,
   H1: 60, H2: 120, H4: 240, D1: 1440, W1: 10080, MN1: 43200,
 };
 const SIDES = new Set(["BUY", "SELL"]);
+const ICT_KINDS = new Set(["BOS", "MSS", "SWEEP", "FVG", "OB", "EQH", "EQL", "PDH", "PDL", "CRT_H", "CRT_L", "SWING", "PREMIUM", "DISCOUNT"]);
+const ANNOTATION_LAYERS = new Set(["liquidity", "structure", "zones", "range", "plan"]);
+const ICT_LAYERS: Record<string, string> = {
+  BOS: "structure", MSS: "structure", SWING: "structure",
+  SWEEP: "liquidity", EQH: "liquidity", EQL: "liquidity", PDH: "liquidity", PDL: "liquidity",
+  FVG: "zones", OB: "zones", CRT_H: "range", CRT_L: "range", PREMIUM: "range", DISCOUNT: "range",
+};
 
 function num(value: unknown): number | null {
   if (typeof value === "boolean" || value === null || value === undefined || value === "") return null;
@@ -64,12 +72,19 @@ function consensusDirection(results: JsonRecord[]): [string, boolean] {
 
 function sanitizeAnnotations(read: JsonRecord): JsonRecord[] {
   const result: JsonRecord[] = [];
-  for (const item of records(read.annotations).slice(0, 8)) {
+  for (const item of records(read.annotations).slice(0, 14)) {
     const kind = item.type;
     if (kind !== "line" && kind !== "rect" && kind !== "text") continue;
     const keys = kind === "line" ? ["x1", "y1", "x2", "y2"]
       : kind === "rect" ? ["x", "y", "w", "h"] : ["x", "y"];
-    const clean: JsonRecord = { type: kind, label: text(item.label, "", 80) };
+    const ict = text(item.ict).toUpperCase().replaceAll(" ", "_");
+    const layer = text(item.layer).toLowerCase();
+    const clean: JsonRecord = {
+      type: kind,
+      label: text(item.label, "", 80),
+      ...(ICT_KINDS.has(ict) ? { ict } : {}),
+      layer: ANNOTATION_LAYERS.has(layer) ? layer : ICT_LAYERS[ict] || "structure",
+    };
     let valid = true;
     for (const key of keys) {
       const value = num(item[key]);
@@ -84,12 +99,16 @@ function sanitizeAnnotations(read: JsonRecord): JsonRecord[] {
   return result;
 }
 
-function pullbackSetup(results: JsonRecord[], direction: string): JsonRecord {
+function pullbackSetup(
+  results: JsonRecord[],
+  direction: string,
+  profile: ReturnType<typeof symbolProfile>,
+): JsonRecord {
   const candidates = results.flatMap((result) => {
     const zone = record(record(result.pullback_zones)[direction]);
     const low = num(zone.low);
     const high = num(zone.high);
-    if (low === null || high === null || low < 500 || high > 10000 || low >= high) return [];
+    if (low === null || high === null || low < profile.price_min || high > profile.price_max || low >= high) return [];
     const quality = text(zone.quality).toLowerCase();
     return [{
       low, high,
@@ -108,7 +127,9 @@ function pullbackSetup(results: JsonRecord[], direction: string): JsonRecord {
   candidates.sort((a, b) => Number(b.quality === "read") - Number(a.quality === "read") || b.confidence - a.confidence);
   const selected = candidates[0];
   const second = candidates[1];
-  if (second && within(selected.low, second.low, 1, 0.001) && within(selected.high, second.high, 1, 0.001)) {
+  if (second
+    && within(selected.low, second.low, profile.price_abs, profile.price_pct)
+    && within(selected.high, second.high, profile.price_abs, profile.price_pct)) {
     return {
       pullback_low: round((selected.low + second.low) / 2, 2),
       pullback_high: round((selected.high + second.high) / 2, 2),
@@ -164,7 +185,9 @@ function buildStrictRead(
   tfPrimary: string,
   tfSecondary: string,
   env: Env,
+  symbol: string,
 ): JsonRecord {
+  const profile = symbolProfile(symbol);
   let [modelBias, directionAgreed] = consensusDirection(results);
   const primary = results[0] || {};
   if (results.length >= 2 && !directionAgreed) modelBias = "WAIT";
@@ -173,13 +196,13 @@ function buildStrictRead(
   const confidence = confidences.length ? Math.round(confidences.reduce((sum, value) => sum + value, 0) / confidences.length) : 0;
   const providerCount = results.length;
   const out: JsonRecord = {
-    symbol: "XAUUSD", mode: "IMAGE_ONLY", direction: "WAIT", model_bias: modelBias,
+    symbol: profile.name, mode: "IMAGE_ONLY", direction: "WAIT", model_bias: modelBias,
     trade_ready: false, levels_available: false, signal_status: "WAIT_FOR_CONFIRMATION",
     confidence, entry_price: null, entry_low: null, entry_high: null, stop_loss: null,
     take_profit_1: null, take_profit_2: null, atr_primary: null, atr_secondary: null,
     effective_atr: null, price_source: "Uploaded screenshot only; not live market data",
     atr_method: "Numeric levels require a clearly readable screenshot price and ATR value on both timeframes.",
-    setup_rationale: text(primary.setup_rationale, "Upload clearer XAUUSD screenshots to receive a chart read."),
+    setup_rationale: text(primary.setup_rationale, `Upload clearer ${profile.name} screenshots to receive a chart read.`),
     invalidation: text(primary.invalidation, "Wait for clear structural invalidation/confirmation."),
     bull_case: text(primary.bull_case), bear_case: text(primary.bear_case),
     timeframe_alignment: text(primary.timeframe_alignment, "unclear"),
@@ -190,9 +213,25 @@ function buildStrictRead(
       secondary_price_alignment: false, symbol_confirmed: false, atr_periods_visible: false,
       levels_calculated: false, single_provider_mode: providerCount === 1,
     },
+    provider_errors: providerErrors,
+    provider_status: {
+      Gemini: {
+        status: results.some((item) => item.provider === "Gemini") ? "ok" : env.GEMINI_API_KEY ? "failed" : "not_configured",
+        model: env.GEMINI_MODEL || "gemini-3.6-flash",
+        confidence: num(results.find((item) => item.provider === "Gemini")?.confidence),
+        error: providerErrors.Gemini || null,
+      },
+      DeepSeek: {
+        status: results.some((item) => item.provider === "DeepSeek") ? "ok" : env.DEEPSEEK_API_KEY ? "failed" : "not_configured",
+        model: env.DEEPSEEK_VISION_MODEL || "deepseek-flash",
+        confidence: num(results.find((item) => item.provider === "DeepSeek")?.confidence),
+        error: providerErrors.DeepSeek || null,
+      },
+    },
     providers: results.map((item) => ({
-      name: text(item.provider, "Unknown"), model: text(item.model),
-      direction: text(item.direction, "WAIT"), confidence: num(item.confidence) || 0,
+      name: text(item.provider, "Unknown"), model: text(item.model), model_name: text(item.model),
+      direction: text(item.direction, "WAIT"), confidence: num(item.confidence) ?? 0,
+      chart_confidence: records(item.chart_reads).map((read) => num(read.confidence)),
     })),
     chart_reads: [], conditional_setups: [],
   };
@@ -210,18 +249,18 @@ function buildStrictRead(
       invalidation: text(primary.invalidation, "Require a clear structural invalidation level before considering entry."),
       numeric_levels_available: false,
     };
-    Object.assign(scenario, pullbackSetup(results, direction));
+    Object.assign(scenario, pullbackSetup(results, direction, profile));
     (out.conditional_setups as JsonRecord[]).push(scenario);
   }
 
-  const priceAbs = num(env.PRICE_AGREEMENT_ABSOLUTE) ?? 0.5;
+  const priceAbs = profile.name === "XAUUSD" ? num(env.PRICE_AGREEMENT_ABSOLUTE) ?? profile.price_abs : profile.price_abs;
   const atrPct = num(env.ATR_AGREEMENT_PERCENT) ?? 0.2;
   const tfNames = [tfPrimary, tfSecondary];
   for (let index = 0; index < 2; index++) {
-    const [price, priceOk] = providerValue(results, index, "current_price", "current_price_readable", priceAbs, 0.0005);
-    const [atr, atrOk] = providerValue(results, index, "atr_value", "atr_visible", 0.05, atrPct);
-    const [top, topOk] = providerValue(results, index, "price_scale_top", "price_scale_readable", priceAbs, 0.0005);
-    const [bottom, bottomOk] = providerValue(results, index, "price_scale_bottom", "price_scale_readable", priceAbs, 0.0005);
+    const [price, priceOk] = providerValue(results, index, "current_price", "current_price_readable", priceAbs, profile.price_pct);
+    const [atr, atrOk] = providerValue(results, index, "atr_value", "atr_visible", profile.atr_abs, atrPct);
+    const [top, topOk] = providerValue(results, index, "price_scale_top", "price_scale_readable", priceAbs, profile.price_pct);
+    const [bottom, bottomOk] = providerValue(results, index, "price_scale_bottom", "price_scale_readable", priceAbs, profile.price_pct);
     const reads = results.map((item) => readAt(item, index));
     const trends = reads.map((item) => text(item.trend, "unclear").toLowerCase());
     const structures = reads.map((item) => text(item.structure, "", 900)).filter(Boolean);
@@ -234,33 +273,51 @@ function buildStrictRead(
     for (const providerRead of reads) {
       keyLevels = records(providerRead.key_levels).slice(0, 8).flatMap((level) => {
         const value = num(level.price);
-        return value !== null && value >= 500 && value <= 10000
+        return value !== null && value >= profile.price_min && value <= profile.price_max
           ? [{ price: round(value, 2), kind: text(level.kind, "other"), label: text(level.label, "", 90) }]
           : [];
       });
       if (keyLevels.length) break;
     }
-    const annotRead = reads.find((item) => records(item.annotations).length) || {};
+    const annotations = reads.flatMap((item) => sanitizeAnnotations(item));
+    const uniqueAnnotations = [...new Map(annotations.map((item) => [JSON.stringify(item), item])).values()].slice(0, 14);
     const chartRead: JsonRecord = {
       timeframe: tfNames[index],
       trend: trends.length && trends.every((value) => value === trends[0]) ? trends[0] : trends.length === 1 ? trends[0] : "mixed",
       trend_agreement: Boolean(trends.length) && trends.every((value) => value === trends[0]),
       structure: structures[0] || "No readable structure summary.",
-      current_price: priceOk && price !== null && price >= 500 && price <= 10000 ? round(price, 2) : null,
-      current_price_verified: Boolean(priceOk && price !== null && price >= 500 && price <= 10000),
+      current_price: priceOk && price !== null && price >= profile.price_min && price <= profile.price_max ? round(price, 2) : null,
+      current_price_verified: Boolean(priceOk && price !== null && price >= profile.price_min && price <= profile.price_max),
       current_price_verification_mode: providerCount >= 2 ? "cross-model" : "single-model image read",
-      atr_value: atrOk && atr !== null && atr >= 0.001 && atr <= 500 ? round(atr, 3) : null,
-      atr_verified: Boolean(atrOk && atr !== null && atr >= 0.001 && atr <= 500),
+      atr_value: atrOk && atr !== null && atr >= Math.max(0.001, profile.atr_floor / 10) && atr <= Math.max(500, profile.atr_floor * 1000) ? round(atr, 3) : null,
+      atr_verified: Boolean(atrOk && atr !== null && atr >= Math.max(0.001, profile.atr_floor / 10) && atr <= Math.max(500, profile.atr_floor * 1000)),
       atr_verification_mode: providerCount >= 2 ? "cross-model" : "single-model image read",
       atr_period: periodOk ? Math.trunc(periods[0]) : null,
       price_scale: { top: scaleOk ? round(top!, 2) : null, bottom: scaleOk ? round(bottom!, 2) : null, verified: Boolean(scaleOk) },
-      key_levels: keyLevels, annotations: sanitizeAnnotations(annotRead),
-      providers: results.map((item) => {
+      key_levels: keyLevels, annotations: uniqueAnnotations,
+      provider_reads: results.map((item) => {
         const read = readAt(item, index);
         return {
-          name: text(item.provider, "Unknown"), current_price: num(read.current_price),
-          atr_value: num(read.atr_value), price_readable: read.current_price_readable === true,
+          name: text(item.provider, "Unknown"),
+          model: text(item.model),
+          confidence: num(item.confidence),
+          chart_confidence: num(read.confidence),
+          timeframe: text(read.timeframe),
+          symbol_detected: text(read.symbol_detected, "unknown"),
+          trend: text(read.trend, "unclear"),
+          structure: text(read.structure, "", 900),
+          current_price: num(read.current_price),
+          current_price_readable: read.current_price_readable === true,
+          price_estimate: num(read.price_estimate),
+          atr_value: num(read.atr_value),
           atr_visible: read.atr_visible === true,
+          atr_estimate: num(read.atr_estimate),
+          atr_period: num(read.atr_period),
+          price_scale_top: num(read.price_scale_top),
+          price_scale_bottom: num(read.price_scale_bottom),
+          price_scale_readable: read.price_scale_readable === true,
+          key_levels: records(read.key_levels).slice(0, 8),
+          annotations: sanitizeAnnotations(read),
         };
       }),
     };
@@ -272,13 +329,18 @@ function buildStrictRead(
   const atrsOk = reads.every((item) => item.atr_verified === true);
   const p0 = num(reads[0].current_price);
   const p1 = num(reads[1].current_price);
-  const priceAlignment = pricesOk && p0 !== null && p1 !== null && within(p0, p1, 1, 0.0005);
+  const priceAlignment = pricesOk && p0 !== null && p1 !== null && within(p0, p1, profile.agree_abs, profile.price_pct);
   const validation = out.validation as JsonRecord;
   validation.current_price_agreement = pricesOk && (providerCount === 1 || reads.every((item) => item.current_price_verified));
   validation.atr_agreement = atrsOk;
   validation.secondary_price_alignment = priceAlignment;
   validation.symbol_confirmed = Boolean(providerCount) && results.every((item) =>
-    [0, 1].every((index) => text(readAt(item, index).symbol_detected).toUpperCase() === "XAUUSD"));
+    matchesSymbol(item.symbol, profile.name)
+    && [0, 1].every((index) => matchesSymbol(readAt(item, index).symbol_detected, profile.name)));
+  validation.requested_symbol = profile.name;
+  validation.timeframe_alignment = out.timeframe_alignment;
+  validation.price_verified_by_timeframe = reads.map((item) => item.current_price_verified === true);
+  validation.atr_verified_by_timeframe = reads.map((item) => item.atr_verified === true);
   const allPeriods = results.flatMap((item) => [0, 1].map((index) => num(readAt(item, index).atr_period)));
   const periodsVerified = allPeriods.length === providerCount * 2
     && allPeriods.every((value) => value !== null && value > 0)
@@ -299,7 +361,10 @@ function buildStrictRead(
   if (!atrsOk) notes.push("A numeric ATR readout was not visible/readable on both screenshots.");
   if (!periodsVerified) notes.push("ATR period was not consistently readable on both screenshots.");
   if (pricesOk && !priceAlignment) notes.push("The screenshot reference prices differ materially. Capture both timeframes close together using the same feed.");
-  if (validation.symbol_confirmed !== true) notes.push("XAUUSD symbol could not be confirmed from both screenshots.");
+  if (validation.symbol_confirmed !== true) notes.push(`${profile.name} symbol could not be confirmed from both screenshots and provider response.`);
+  for (const [provider, error] of Object.entries(providerErrors)) {
+    notes.push(`${provider} provider unavailable: ${text(error, "analysis failed", 220)}`);
+  }
   if (providerCount >= 2 && !directionAgreed) notes.push("The two AI readers did not agree on direction. Review the conditional BUY/SELL triggers.");
   const directionalOk = SIDES.has(text(out.model_bias));
   const confidenceOk = confidence >= (num(env.CONFIDENCE_MINIMUM) ?? 65);
@@ -464,13 +529,14 @@ function applyForcedSignal(
   tfPrimary: string,
   tfSecondary: string,
   env: Env,
+  symbol: string,
 ): JsonRecord {
   const validation = record(out.validation);
   const strictOk = out.levels_available === true && SIDES.has(text(out.direction));
   const alignment = text(out.timeframe_alignment, "unclear");
   if (strictOk) {
     const mode = validation.direction_agreement ? "agreed" : "single";
-    const signalGrade = grade(mode, "read", "read", num(out.confidence) || 0, alignment);
+    const signalGrade = grade(mode, "read", "read", num(out.confidence) ?? 0, alignment);
     Object.assign(out, {
       forced_signal: false,
       signal_grade: signalGrade,
@@ -496,17 +562,25 @@ function applyForcedSignal(
     .map((result) => num(result.confidence))
     .filter((value): value is number => value !== null)
     .map((value) => Math.max(0, Math.min(100, value)));
-  const confidence = mode === "trend" ? 35
-    : Math.round((sideConfidence.length ? sideConfidence.reduce((sum, value) => sum + value, 0) / sideConfidence.length : 40) * (split ? 0.85 : 1));
+  const profile = symbolProfile(symbol);
+  const actualConfidence = mode === "trend"
+    ? results.map((result) => num(result.confidence)).filter((value): value is number => value !== null)
+    : sideConfidence;
+  const confidence = mode === "trend"
+    ? 35
+    : Math.round((actualConfidence.length
+      ? actualConfidence.reduce((sum, value) => sum + value, 0) / actualConfidence.length
+      : 40) * (split ? 0.85 : 1));
   const tfMinutes = [TF_MINUTES[tfPrimary] || 1, TF_MINUTES[tfSecondary] || 5];
-  const priceTolerance: [number, number] = [num(env.PRICE_AGREEMENT_ABSOLUTE) ?? 0.5, 0.0005];
-  const [price0, priceQ0] = bestValue(results, 0, "current_price", "current_price_readable", "price_estimate", 500, 10000, priceTolerance);
-  const [price1, priceQ1] = bestValue(results, 1, "current_price", "current_price_readable", "price_estimate", 500, 10000, priceTolerance);
+  const priceAbs = profile.name === "XAUUSD" ? num(env.PRICE_AGREEMENT_ABSOLUTE) ?? profile.price_abs : profile.price_abs;
+  const priceTolerance: [number, number] = [priceAbs, profile.price_pct];
+  const [price0, priceQ0] = bestValue(results, 0, "current_price", "current_price_readable", "price_estimate", profile.price_min, profile.price_max, priceTolerance);
+  const [price1, priceQ1] = bestValue(results, 1, "current_price", "current_price_readable", "price_estimate", profile.price_min, profile.price_max, priceTolerance);
   let price: number | null = null;
   let priceQuality: string | null = null;
   if (price0 !== null && price1 !== null) {
     [price, priceQuality] = priceQ0 !== "read" && priceQ1 === "read" ? [price1, priceQ1] : [price0, priceQ0];
-    if (!within(price0, price1, 1, 0.0005)) notes.push(`The two screenshots show different prices (${price0.toFixed(2)} vs ${price1.toFixed(2)}). Entry uses the more reliable one.`);
+    if (!within(price0, price1, profile.agree_abs, profile.price_pct)) notes.push(`The two screenshots show different prices (${price0.toFixed(2)} vs ${price1.toFixed(2)}). Entry uses the more reliable one.`);
   } else if (price0 !== null) [price, priceQuality] = [price0, priceQ0];
   else if (price1 !== null) [price, priceQuality] = [price1, priceQ1];
   const chartReads = out.chart_reads as JsonRecord[];
@@ -522,7 +596,7 @@ function applyForcedSignal(
   let atrQ0: string | null = null;
   let atrQ1: string | null = null;
   if (price !== null) {
-    const atrTolerance: [number, number] = [0.05, num(env.ATR_AGREEMENT_PERCENT) ?? 0.2];
+    const atrTolerance: [number, number] = [profile.atr_abs, num(env.ATR_AGREEMENT_PERCENT) ?? 0.2];
     const min = price * 0.00005;
     const max = price * 0.02;
     [atr0, atrQ0] = bestValue(results, 0, "atr_value", "atr_visible", "atr_estimate", min, max, atrTolerance);
@@ -540,8 +614,8 @@ function applyForcedSignal(
     } else if (normalizedSecondary !== null) {
       effectiveAtr = normalizedSecondary; atrQuality = atrQ1; atrNote = `ATR ${tfSecondary} normalized to ${tfPrimary}`;
     } else {
-      const [top] = bestValue(results, 0, "price_scale_top", "price_scale_readable", null, 500, 10000, [0.5, 0.0005]);
-      const [bottom] = bestValue(results, 0, "price_scale_bottom", "price_scale_readable", null, 500, 10000, [0.5, 0.0005]);
+      const [top] = bestValue(results, 0, "price_scale_top", "price_scale_readable", null, profile.price_min, profile.price_max, [priceAbs, profile.price_pct]);
+      const [bottom] = bestValue(results, 0, "price_scale_bottom", "price_scale_readable", null, profile.price_min, profile.price_max, [priceAbs, profile.price_pct]);
       effectiveAtr = top !== null && bottom !== null && top > bottom
         ? (top - bottom) * 0.05
         : price * 0.0008 * Math.sqrt(Math.max(tfMinutes[0], 1) / 5);
@@ -550,7 +624,7 @@ function applyForcedSignal(
         : "rough: 0.08% of price scaled by timeframe";
       atrQuality = "heuristic";
     }
-    effectiveAtr = Math.max(effectiveAtr, 0.05);
+    effectiveAtr = Math.max(effectiveAtr, profile.atr_floor);
     const risk = effectiveAtr * 1.2;
     const halfWidth = effectiveAtr * 0.1;
     const sign = direction === "BUY" ? 1 : -1;
@@ -595,9 +669,11 @@ export function buildTradeRead(
   tfPrimary: string,
   tfSecondary: string,
   env: Env,
+  symbol = "XAUUSD",
 ): JsonRecord {
-  const strict = buildStrictRead(providerResults, providerErrors, tfPrimary, tfSecondary, env);
+  const normalizedSymbol = symbolProfile(symbol).name;
+  const strict = buildStrictRead(providerResults, providerErrors, tfPrimary, tfSecondary, env, normalizedSymbol);
   return env.FORCE_SIGNAL?.trim().toLowerCase() === "false"
     ? strict
-    : applyForcedSignal(strict, providerResults, tfPrimary, tfSecondary, env);
+    : applyForcedSignal(strict, providerResults, tfPrimary, tfSecondary, env, normalizedSymbol);
 }

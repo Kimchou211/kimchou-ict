@@ -248,6 +248,113 @@ test("health route reports Neon connectivity", async () => {
   }
 });
 
+test("image analysis honors selected symbol and keeps R2 uploads and Neon history", async () => {
+  const originalFetch = globalThis.fetch;
+  const neon = makeNeonFetch();
+  const uploaded: Array<{ key: string; bytes: Uint8Array }> = [];
+  let promptText = "";
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.hostname === "generativelanguage.googleapis.com") {
+      const body = JSON.parse(String(init?.body)) as {
+        contents: Array<{ parts: Array<Record<string, unknown>> }>;
+      };
+      promptText = String(body.contents[0].parts[0].text);
+      return Response.json({
+        candidates: [{
+          content: {
+            parts: [{
+              text: JSON.stringify({
+                symbol: "BTCUSD",
+                direction: "BUY",
+                confidence: 1,
+                setup_rationale: "BTCUSD bullish structure.",
+                timeframe_alignment: "aligned",
+                risk_notes: [],
+                chart_reads: ["M15", "H1"].map((timeframe, index) => ({
+                  timeframe,
+                  symbol_detected: "BTCUSD",
+                  current_price: null,
+                  current_price_readable: false,
+                  price_estimate: 65_000 + index,
+                  atr_value: null,
+                  atr_visible: false,
+                  atr_estimate: null,
+                  atr_period: 14,
+                  trend: "bullish",
+                  structure: "Higher highs and higher lows with a bullish break of structure.",
+                  price_scale_top: 66_000,
+                  price_scale_bottom: 64_000,
+                  price_scale_readable: true,
+                  confidence: 1,
+                  key_levels: [{ price: 64_800, kind: "support", label: "Support" }],
+                  annotations: [{
+                    type: "line", ict: "BOS", layer: "structure",
+                    x1: 100, y1: 400, x2: 900, y2: 400, label: "BOS",
+                  }],
+                })),
+                entry_trigger_buy: "Break and retest the visible swing high.",
+                entry_trigger_sell: "Break below the visible swing low and fail its retest.",
+                pullback_zones: {
+                  BUY: { low: 64_700, high: 64_900, quality: "estimated", basis: "Support retest." },
+                  SELL: { low: 65_500, high: 65_700, quality: "estimated", basis: "Resistance retest." },
+                },
+              }),
+            }],
+          },
+        }],
+      });
+    }
+    return neon.fetcher(input, init);
+  };
+  const uploads = {
+    async put(key: string, value: ArrayBuffer | ArrayBufferView, _options?: unknown) {
+      const bytes = value instanceof ArrayBuffer
+        ? new Uint8Array(value)
+        : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      uploaded.push({ key, bytes });
+    },
+    async delete(_key: string) {},
+  };
+  try {
+    const form = new FormData();
+    form.append("symbol", "BTCUSD");
+    form.append("tf_primary", "M15");
+    form.append("tf_secondary", "H1");
+    form.append("primary_image", new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])], "primary.png", { type: "image/png" }));
+    form.append("secondary_image", new File([new Uint8Array([0xff, 0xd8, 0xff])], "secondary.jpg", { type: "image/jpeg" }));
+    const response = await worker.fetch(new Request("https://example.test/api/analyze", {
+      method: "POST",
+      headers: authHeaders(),
+      body: form,
+    }), {
+      ...env(),
+      GEMINI_API_KEY: "test-gemini-key",
+      GEMINI_MODEL: "test-gemini-model",
+      UPLOADS: uploads,
+    } as never);
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      history_saved: boolean;
+      analysis: { symbol: string; confidence: number; providers: Array<{ confidence: number }>; chart_reads: Array<{ annotations: Array<Record<string, unknown>> }> };
+    };
+    assert.equal(body.analysis.symbol, "BTCUSD");
+    assert.equal(body.analysis.confidence, 1);
+    assert.equal(body.analysis.providers[0].confidence, 1);
+    assert.equal(body.analysis.chart_reads[0].timeframe, "M15");
+    assert.equal(body.analysis.chart_reads[1].timeframe, "H1");
+    assert.ok(body.analysis.chart_reads[0].annotations.some((annotation) => annotation.ict === "BOS" && annotation.layer === "structure"));
+    assert.equal(uploaded.length, 2);
+    assert.match(promptText, /BTCUSD/);
+    const insert = neon.queries.find(({ query }) => query.trimStart().startsWith("INSERT INTO analysis_records"));
+    assert.ok(insert);
+    assert.equal(insert.params[1], "BTCUSD");
+    assert.equal(body.history_saved, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("ICT routes reject unsupported timeframes instead of returning 404", async () => {
   const response = await worker.fetch(new Request("https://example.test/api/ict/scan?tf=H1&ai=false", {
     method: "POST",
